@@ -17,6 +17,7 @@ class _StoragePrefetchRetry:
     immediate: bool
     storage_hit_end: Optional[int] = None
     due_step: Optional[int] = None
+    scheduled_step: Optional[int] = None
 
 
 class StoragePrefetchRetries:
@@ -98,6 +99,7 @@ class StoragePrefetchRetries:
                     self.cancel(req.rid)
                     continue
                 if retry.due_step is None:
+                    retry.scheduled_step = self._step
                     retry.due_step = self._step + interval
                     logger.debug(
                         "HiCache storage retry event=scheduled pid=%d req=%s step=%d interval=%d due_step=%d",
@@ -109,14 +111,26 @@ class StoragePrefetchRetries:
                     )
                 if retry.due_step > self._step:
                     continue
+            # Measure from the recorded scheduling step, rather than deriving
+            # the elapsed interval from the configured value being verified.
+            actual_interval = (
+                self._step - retry.scheduled_step
+                if retry.scheduled_step is not None
+                else None
+            )
             logger.debug(
-                "HiCache storage retry event=fired pid=%d req=%s step=%d interval=%d mode=%s due_step=%s",
+                "HiCache storage retry event=fired pid=%d req=%s step=%d interval=%d "
+                "mode=%s due_step=%s scheduled_step=%s actual_interval=%s "
+                "interval_match=%s unit=scheduling_passes",
                 os.getpid(),
                 req.rid,
                 self._step,
                 interval,
                 "immediate" if retry.immediate else "poll",
                 retry.due_step,
+                retry.scheduled_step,
+                actual_interval,
+                "n/a" if retry.immediate else actual_interval == interval,
             )
             self.cancel(req.rid)
             ready.append((req, retry.storage_hit_end))
