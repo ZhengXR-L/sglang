@@ -39,7 +39,9 @@ TEST_ENVS = {
     "STREAMS_PER_DEVICE": "32",
     "HCCL_SOCKET_IFNAME": "lo",
     "GLOO_SOCKET_IFNAME": "lo",
-    "HCCL_BUFFSIZE": "200",
+    # EP=8 low-latency combine with dispatch capacity 128 requires >=557 MB.
+    "HCCL_BUFFSIZE": "1024",
+    "DEEPEP_HCCL_BUFFSIZE": "1024",
     "SGLANG_ZBAL_LOCAL_MEM_SIZE": "0",
     "SGLANG_ENABLE_TP_MEMORY_INBALANCE_CHECK": "1",
     "SGLANG_NPU_USE_MULTI_STREAM": "0",
@@ -105,7 +107,8 @@ def server_args(enable_decode_tp, graph_backend):
         "--page-size",
         "128",
         "--mem-fraction-static",
-        "0.7",
+        # Eight-card W8A8 weights use ~43.84 GiB/rank; 0.7 leaves no KV budget.
+        "0.8",
         "--chunked-prefill-size",
         "4096",
         "--prefill-max-requests",
