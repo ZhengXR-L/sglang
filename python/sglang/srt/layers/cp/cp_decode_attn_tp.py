@@ -54,6 +54,11 @@ class CpDecodeAttnTpContext:
         enable_attn_tp = get_parallel().enable_cp_decode_attn_tp
 
         if enable_attn_tp and get_parallel().attn_cp_size > 1:
+            if get_parallel().attn_tp_size != 1:
+                raise ValueError(
+                    "CP decode attention TP requires replicated attention weights "
+                    "(attn_tp_size=1)"
+                )
             self.decode_tp_rank = get_parallel().attn_cp_rank
             self.decode_tp_size = get_parallel().attn_cp_size
             logger.info("Enable CP decode attention TP")
@@ -105,7 +110,14 @@ class CpDecodeAttnTpContext:
         cache_key = (id(obj), attr_name)
         cache = self._slice_cache.get(cache_key)
         if cache is None:
-            cache = (raw, self._slice(raw, dim), is_param)
+            scheme = getattr(obj, "scheme", None)
+            prepare = getattr(scheme, "prepare_cp_decode_weight", None)
+            local = (
+                prepare(raw, dim, self.decode_tp_rank, self.decode_tp_size)
+                if attr_name == "weight" and prepare is not None
+                else self._slice(raw, dim)
+            )
+            cache = (raw, local, is_param)
             self._slice_cache[cache_key] = cache
 
         if cache[2]:
@@ -135,6 +147,15 @@ class CpDecodeAttnTpContext:
             dim = 0
         else:
             return []
+
+        scheme = getattr(linear_instance, "scheme", None)
+        slice_attrs = getattr(scheme, "get_cp_decode_slice_attrs", None)
+        if slice_attrs is not None:
+            return slice_attrs(linear_instance, row_parallel=dim == 1)
+        if scheme is not None:
+            raise ValueError(
+                f"CP decode attention TP does not support scheme {type(scheme).__name__}"
+            )
 
         attrs = [(linear_instance, "weight", dim)]
         for scale_name in ("weight_scale_inv", "weight_scale"):
