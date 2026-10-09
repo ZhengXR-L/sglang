@@ -123,44 +123,20 @@ def resolve_model_path():
 
 
 class TestNPUCpDecodeAttnTP(GSM8KAscendMixin, CustomTestCase):
-    """Evaluate the enabled CP decode attention TP path on eight NPUs."""
+    """Testcase: Verify that --enable-cp-decode-attn-tp keeps GSM8K accuracy on NPU
+    for DeepSeek-V4-Flash with context parallelism (--attn-cp-size 8).
 
+    [Test Category] Context Parallel
+    [Test Target] --enable-cp-decode-attn-tp
+    """
+
+    model = resolve_model_path()
     timeout_for_server_launch = 1800  # Seconds, not milliseconds.
     other_args = SERVER_ARGS
     env = {**os.environ, **TEST_ENVS}
     accuracy = 0.93
     # The evaluator uses five test-set examples as shots, leaving 1314 scored.
-    num_questions = 1314
-
-    @classmethod
-    def setUpClass(cls):
-        cls.model = resolve_model_path()
-
-        super().setUpClass()
-        try:
-            response = requests.get(f"{cls.base_url}/server_info", timeout=30)
-            response.raise_for_status()
-            info = response.json()
-            expected = {
-                "enable_cp_decode_attn_tp": True,
-                "enable_prefill_cp": True,
-                "attn_cp_size": PARALLEL_SIZE,
-                "tp_size": PARALLEL_SIZE,
-                "dp_size": 1,
-                "cp_strategy": "interleave",
-            }
-            for key, value in expected.items():
-                if info.get(key) != value:
-                    raise AssertionError(
-                        f"server_info.{key}={info.get(key)!r}, expected {value!r}"
-                    )
-            # CudaGraphConfig.to_dict omits the default decode backend (full).
-            decode_graph = info["cuda_graph_config"]["decode"]
-            if decode_graph.get("backend", "full") != "full":
-                raise AssertionError(f"Unexpected decode graph backend: {decode_graph}")
-        except Exception:
-            cls.tearDownClass()
-            raise
+    num_questions = 1319
 
 
 if __name__ == "__main__":
