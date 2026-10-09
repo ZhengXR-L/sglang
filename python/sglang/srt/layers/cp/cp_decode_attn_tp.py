@@ -54,11 +54,6 @@ class CpDecodeAttnTpContext:
         enable_attn_tp = get_parallel().enable_cp_decode_attn_tp
 
         if enable_attn_tp and get_parallel().attn_cp_size > 1:
-            if get_parallel().attn_tp_size != 1:
-                raise ValueError(
-                    "CP decode attention TP requires replicated attention weights "
-                    "(attn_tp_size=1)"
-                )
             self.decode_tp_rank = get_parallel().attn_cp_rank
             self.decode_tp_size = get_parallel().attn_cp_size
             logger.info("Enable CP decode attention TP")

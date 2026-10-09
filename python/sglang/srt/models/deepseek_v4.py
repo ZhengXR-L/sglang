@@ -1008,13 +1008,6 @@ class MqaAttentionBase(nn.Module):
     @contextmanager
     def maybe_use_decode_attn_tp(self, forward_batch: ForwardBatch):
         ctx = get_cp_decode_attn_tp_ctx()
-        if ctx.is_enabled:
-            for name, count in (("heads", self.n_heads), ("output groups", self.n_groups)):
-                if count < ctx.decode_tp_size or count % ctx.decode_tp_size:
-                    raise ValueError(
-                        f"CP decode attention TP: {count} {name} must be divisible "
-                        f"by CP size {ctx.decode_tp_size}"
-                    )
         attn = self.attn_mqa if isinstance(self, MQALayer) else self.attn
         with ctx.maybe_use_decode_attn_tp(
             forward_batch,

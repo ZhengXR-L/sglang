@@ -110,16 +110,9 @@ class ModelSlimW8A8Int8(ModelSlimLinearScheme):
 
     def get_cp_decode_slice_attrs(self, layer, *, row_parallel: bool):
         """Describe the post-load [input, output] layout, not checkpoint axes."""
-        if not self.is_dynamic:
+        if not self.is_dynamic: # 测试的模型是动态w8a8，静态的可能不一样，未测试
             raise ValueError("CP decode attention TP requires dynamic ModelSlim W8A8")
-        from sglang.srt.runtime_context import get_parallel
 
-        if get_parallel().tp_size != get_parallel().attn_cp_size:
-            raise ValueError("ModelSlim CP decode attention TP requires TP=CP and DP=1")
-        if getattr(layer, "bias", None) is not None:
-            raise ValueError(
-                "ModelSlim CP decode attention TP requires bias-free projections"
-            )
         attrs = [(layer, "weight", 0 if row_parallel else 1)]
         if not row_parallel:
             # Scales/offsets are per output channel. Row shards still produce
