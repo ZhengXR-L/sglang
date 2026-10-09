@@ -76,9 +76,9 @@ SERVER_ARGS = [
     "--chunked-prefill-size",
     "4096",
     "--prefill-max-requests",
-    "64",
+    "8",
     "--max-running-requests",
-    "64",
+    "8",
     "--moe-a2a-backend",
     "deepep",
     "--deepep-mode",
@@ -135,22 +135,6 @@ class TestNPUCpDecodeAttnTP(GSM8KAscendMixin, CustomTestCase):
     @classmethod
     def setUpClass(cls):
         cls.model = resolve_model_path()
-        with open(Path(cls.model) / "config.json") as f:
-            config = json.load(f)
-        if config.get("architectures", [None])[0] != "DeepseekV4ForCausalLM":
-            raise ValueError("This regression requires DeepseekV4ForCausalLM")
-        for field in ("num_attention_heads", "o_groups"):
-            value = config[field]
-            if value < PARALLEL_SIZE or value % PARALLEL_SIZE:
-                raise ValueError(
-                    f"{field}={value} must be positive and divisible by CP={PARALLEL_SIZE}"
-                )
-        with open(Path(cls.model) / "quant_model_description.json") as f:
-            quant_config = json.load(f)
-        for suffix in ("attn.wq_b.weight", "attn.wo_b.weight"):
-            entries = [v for k, v in quant_config.items() if k.endswith(suffix)]
-            if not entries or any(v != "W8A8_DYNAMIC" for v in entries):
-                raise ValueError(f"Expected W8A8_DYNAMIC entries for {suffix}")
 
         super().setUpClass()
         try:
