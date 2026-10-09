@@ -5,12 +5,9 @@ It checks the server configuration and evaluates GSM8K instead of comparing
 individual tokens or logprobs against a second server.
 """
 
-import json
 import os
 import unittest
 from pathlib import Path
-
-import requests
 
 from sglang.test.ascend.gsm8k_ascend_mixin import GSM8KAscendMixin
 from sglang.test.ci.ci_register import register_npu_ci
@@ -135,7 +132,6 @@ class TestNPUCpDecodeAttnTP(GSM8KAscendMixin, CustomTestCase):
     other_args = SERVER_ARGS
     env = {**os.environ, **TEST_ENVS}
     accuracy = 0.93
-    # The evaluator uses five test-set examples as shots, leaving 1314 scored.
     num_questions = 1319
 
 
