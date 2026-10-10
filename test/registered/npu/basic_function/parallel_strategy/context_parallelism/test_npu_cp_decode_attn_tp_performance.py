@@ -93,7 +93,7 @@ COMMON_SERVER_ARGS = [
 
 
 class TestNPUCpDecodeAttnTPPerformance(CustomTestCase):
-    """Measure the decode gain from splitting attention linears across CP ranks.
+    """DeepSeek-V4-Flash-0731-W8A8 improves TPOT with CP decode attention TP enabled.
 
     [Test Category] Context Parallel
     [Test Target] --enable-cp-decode-attn-tp
@@ -137,6 +137,7 @@ class TestNPUCpDecodeAttnTPPerformance(CustomTestCase):
 
         off_tpot = float(disabled["mean_tpot_ms"])
         on_tpot = float(enabled["mean_tpot_ms"])
+        off_throughput = float(disabled["output_throughput"])
         speedup = off_tpot / on_tpot
         throughput_gain = (
             float(enabled["output_throughput"]) / off_throughput - 1
