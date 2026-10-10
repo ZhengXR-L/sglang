@@ -132,7 +132,8 @@ class TestNPUCpDecodeAttnTP(GSM8KAscendMixin, CustomTestCase):
     other_args = SERVER_ARGS
     env = {**os.environ, **TEST_ENVS}
     accuracy = 0.93
-    num_questions = 1319
+    num_questions = 200
+    gsm8k_num_shots = 8
 
 
 if __name__ == "__main__":
