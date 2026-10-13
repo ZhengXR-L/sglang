@@ -517,6 +517,7 @@ class Qwen4ExpPLEGroupedNorm(nn.Module):
         if (
             self._jit_group_size is not None
             and x.is_cuda
+            and torch.version.cuda is not None
             and x.dtype in (torch.bfloat16, torch.float16)
         ):
             from sglang.kernels.ops.layernorm.grouped_gemma_rmsnorm import (
