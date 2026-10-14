@@ -1,9 +1,11 @@
 use super::{
-    DEFAULT_GRPC_MAX_MESSAGE_SIZE, openai_status_code, resolve_max_message_size,
-    terminal_error_status,
+    DEFAULT_GRPC_MAX_MESSAGE_SIZE, openai_status_code, recv_chunk_with_timeout,
+    resolve_max_message_size, terminal_error_status,
 };
-use crate::bridge::TerminalError;
+use crate::bridge::{ResponseChunk, ResponseData, TerminalError};
 use std::collections::HashMap;
+use std::time::Duration;
+use tokio::sync::mpsc;
 use tonic::Code;
 
 // The metadata wire test starts a real server that reads SGLANG_TONIC_PAYLOAD.
@@ -40,6 +42,48 @@ fn terminal_error_status_maps_abort_to_cancelled() {
     });
 
     assert_eq!(status.code(), Code::Cancelled);
+}
+
+#[tokio::test]
+async fn recv_chunk_with_timeout_returns_deadline_exceeded_when_idle() {
+    // The sender stays alive but never sends, so `receiver.recv()` never
+    // resolves; only the timeout can complete the await, surfacing a
+    // DeadlineExceeded status with the caller's message.
+    let (_tx, mut rx) = mpsc::channel::<ResponseChunk>(1);
+    let started = std::time::Instant::now();
+
+    let result = recv_chunk_with_timeout(&mut rx, Duration::from_millis(50), || {
+        "Stream chunk timed out".to_string()
+    })
+    .await;
+
+    let status = result.unwrap_err();
+    assert_eq!(status.code(), Code::DeadlineExceeded);
+    assert!(status.message().contains("Stream chunk timed out"));
+    // Timeout is a lower bound, not an exact deadline.
+    assert!(started.elapsed() >= Duration::from_millis(50));
+}
+
+#[tokio::test]
+async fn recv_chunk_with_timeout_yields_chunk_before_deadline() {
+    let (tx, mut rx) = mpsc::channel::<ResponseChunk>(1);
+    tx.send(ResponseChunk::Finished(ResponseData {
+        text: Some("ok".to_string()),
+        output_ids: None,
+        embedding: None,
+        json_bytes: None,
+        meta_info: HashMap::new(),
+    }))
+    .await
+    .unwrap();
+
+    let result = recv_chunk_with_timeout(&mut rx, Duration::from_secs(5), || {
+        "Stream chunk timed out".to_string()
+    })
+    .await;
+
+    let chunk = result.unwrap().unwrap();
+    assert!(matches!(chunk, ResponseChunk::Finished(_)));
 }
 
 // SAFETY: env vars are process-global; bundle all SGLANG_TONIC_PAYLOAD cases into one
