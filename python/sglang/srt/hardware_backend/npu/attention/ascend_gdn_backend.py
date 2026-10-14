@@ -315,7 +315,14 @@ class AscendGDNAttnBackend(AscendMambaAttnBackendBase):
             g, beta = fused_gdn_gating(layer.A_log, a, b, layer.dt_bias)
 
             core_attn_out, last_recurrent_state, h = self.chunk_gdn(
-                query, key, value, g, beta, ssm_states[cache_indices], query_start_loc
+                query,
+                key,
+                value,
+                g,
+                beta,
+                ssm_states[cache_indices],
+                query_start_loc,
+                forward_batch.extend_seq_lens_cpu,
             )
 
             if last_recurrent_state is not None:
@@ -339,6 +346,7 @@ class AscendGDNAttnBackend(AscendMambaAttnBackendBase):
         beta,
         initial_state,
         cu_seqlens,
+        seq_lens_cpu=None,
     ):
         q = l2norm_fwd(q)  # [T, Nk, Dk]
         k = l2norm_fwd(k)  # [T, Nk, Dk]
@@ -346,13 +354,16 @@ class AscendGDNAttnBackend(AscendMambaAttnBackendBase):
         scale = k.shape[-1] ** -0.5
 
         chunk_size = 64
-        chunk_indices = (
-            prepare_chunk_indices(cu_seqlens, chunk_size)
-            if cu_seqlens is not None
-            else None
-        )
+        if seq_lens_cpu is not None and len(seq_lens_cpu) == cu_seqlens.shape[0] - 1:
+            # Only the number of chunks is needed for the NPU output buffer.
+            # Reading chunk indices from cu_seqlens would synchronize the device.
+            num_chunks = sum(
+                (seq_len + chunk_size - 1) // chunk_size for seq_len in seq_lens_cpu
+            )
+        else:
+            num_chunks = len(prepare_chunk_indices(cu_seqlens, chunk_size))
         h = k.new_empty(
-            len(chunk_indices), v.shape[-2], v.shape[-1], k.shape[-1]
+            num_chunks, v.shape[-2], v.shape[-1], k.shape[-1]
         )  # [NT, NH, DV, Dk]
 
         core_attn_out, last_recurrent_state = torch.ops.npu.chunk_gated_delta_rule(

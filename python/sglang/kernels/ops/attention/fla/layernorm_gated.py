@@ -386,7 +386,9 @@ def rms_norm_gated(
     if bias is not None:
         bias = bias.contiguous()
     if _is_npu:
-        assert activation == "swish", "NPU only supports swish activation"
+        assert activation in ("swish", "silu", "sigmoid"), (
+            f"NPU does not support {activation} gated normalization"
+        )
     y, mean, rstd = _layer_norm_fwd(
         x,
         weight,

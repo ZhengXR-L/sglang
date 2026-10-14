@@ -7,6 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from sglang.kernels.ops.gemm.hc_mix import fused_hc_mix, fused_hc_mix_supported
+from sglang.srt.utils import is_npu
 
 
 @lru_cache(None)
@@ -156,7 +157,8 @@ class GatedResidual(HyperConnectionBase):
             )
             lowrank = self.config.hc_lowrank
             self._jit_mix_ok = (
-                torch.cuda.is_available()
+                torch.version.cuda is not None
+                and torch.cuda.is_available()
                 # The CuTe split-K pair is tcgen05 (sm_100 family) only.
                 and torch.cuda.get_device_capability()[0] == 10
                 and (self.hc_count * self.hidden_size) % 2048 == 0
@@ -176,7 +178,8 @@ class GatedResidual(HyperConnectionBase):
             )
             # hc_combine rejects other shapes; device and dtype are checked per call.
             self._jit_combine_ok = (
-                self.hidden_size % 8 == 0
+                torch.version.cuda is not None
+                and self.hidden_size % 8 == 0
                 and (self.hc_count * self.hidden_size) % 2048 == 0
             )
             vecs = self.hc_count * self.hidden_size // 8
@@ -190,6 +193,7 @@ class GatedResidual(HyperConnectionBase):
                 and self.hidden_size == 2560
                 and config.hc_per_branch_norm
                 and config.params_dtype == torch.bfloat16
+                and torch.version.cuda is not None
                 and torch.cuda.is_available()
                 and torch.cuda.get_device_capability()[0] == 10
             ):
@@ -231,8 +235,12 @@ class GatedResidual(HyperConnectionBase):
             )
             return (R + injection).flatten(-2)
 
-        self._mix_compute = torch.compile(_mix_compute)
-        self._combine_compute = torch.compile(_combine_compute)
+        # The NPU Inductor path cannot compile these shapes; run the same
+        # tensor operations eagerly on Ascend.
+        self._mix_compute = _mix_compute if is_npu() else torch.compile(_mix_compute)
+        self._combine_compute = (
+            _combine_compute if is_npu() else torch.compile(_combine_compute)
+        )
 
     def mix(
         self,
