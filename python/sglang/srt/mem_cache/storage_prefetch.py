@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
@@ -7,12 +9,15 @@ if TYPE_CHECKING:
     from sglang.srt.managers.schedule_batch import Req
     from sglang.srt.mem_cache.radix_cache import RadixKey
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class _StoragePrefetchRetry:
     immediate: bool
     storage_hit_end: Optional[int] = None
     due_step: Optional[int] = None
+    scheduled_step: Optional[int] = None
 
 
 class StoragePrefetchRetries:
@@ -23,9 +28,16 @@ class StoragePrefetchRetries:
     def __init__(self):
         self._pending: dict[str, _StoragePrefetchRetry] = {}
         self._step = 0
+        logger.info("HiCache storage retry observer initialized pid=%d", os.getpid())
 
     def poll_miss(self, req_id: str, storage_hit_end: Optional[int] = None) -> None:
         self._pending[req_id] = _StoragePrefetchRetry(False, storage_hit_end)
+        logger.debug(
+            "HiCache storage retry miss armed pid=%d req=%s step=%d",
+            os.getpid(),
+            req_id,
+            self._step,
+        )
 
     def refetch(self, req_id: str, storage_hit_end: Optional[int] = None) -> None:
         self._pending[req_id] = _StoragePrefetchRetry(True, storage_hit_end)
@@ -46,6 +58,13 @@ class StoragePrefetchRetries:
         head_id = waiting_queue[0].rid
         head_retry = self._pending.get(head_id)
         if head_retry is not None and not head_retry.immediate:
+            logger.debug(
+                "HiCache storage retry event=cancelled pid=%d req=%s step=%d interval=%d reason=head",
+                os.getpid(),
+                head_id,
+                self._step,
+                interval,
+            )
             self.cancel(head_id)
         if not any(
             retry.due_step is None or retry.due_step <= self._step
@@ -59,16 +78,60 @@ class StoragePrefetchRetries:
             if retry is None:
                 continue
             if req.storage_prefetch_retry_attempts >= max_attempts:
+                logger.debug(
+                    "HiCache storage retry event=cancelled pid=%d req=%s step=%d interval=%d reason=budget",
+                    os.getpid(),
+                    req.rid,
+                    self._step,
+                    interval,
+                )
                 self.cancel(req.rid)
                 continue
             if not retry.immediate:
                 if interval <= 0:
+                    logger.debug(
+                        "HiCache storage retry event=cancelled pid=%d req=%s step=%d interval=%d reason=disabled",
+                        os.getpid(),
+                        req.rid,
+                        self._step,
+                        interval,
+                    )
                     self.cancel(req.rid)
                     continue
                 if retry.due_step is None:
+                    retry.scheduled_step = self._step
                     retry.due_step = self._step + interval
+                    logger.debug(
+                        "HiCache storage retry event=scheduled pid=%d req=%s step=%d interval=%d due_step=%d",
+                        os.getpid(),
+                        req.rid,
+                        self._step,
+                        interval,
+                        retry.due_step,
+                    )
                 if retry.due_step > self._step:
                     continue
+            # Measure from the recorded scheduling step, rather than deriving
+            # the elapsed interval from the configured value being verified.
+            actual_interval = (
+                self._step - retry.scheduled_step
+                if retry.scheduled_step is not None
+                else None
+            )
+            logger.debug(
+                "HiCache storage retry event=fired pid=%d req=%s step=%d interval=%d "
+                "mode=%s due_step=%s scheduled_step=%s actual_interval=%s "
+                "interval_match=%s unit=scheduling_passes",
+                os.getpid(),
+                req.rid,
+                self._step,
+                interval,
+                "immediate" if retry.immediate else "poll",
+                retry.due_step,
+                retry.scheduled_step,
+                actual_interval,
+                "n/a" if retry.immediate else actual_interval == interval,
+            )
             self.cancel(req.rid)
             ready.append((req, retry.storage_hit_end))
         return ready
