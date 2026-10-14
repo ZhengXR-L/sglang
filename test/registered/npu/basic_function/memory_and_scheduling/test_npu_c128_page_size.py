@@ -120,7 +120,12 @@ class TestNpuC128PageSize(CustomTestCase):
         kill_process_tree(cls.process.pid)
 
     def test_c128_page_size_server_and_inference(self):
-        eval_obj = GSM8KEval(num_examples=100, num_threads=16, num_shots=20)
+        eval_obj = GSM8KEval(
+            num_examples=100,
+            num_threads=16,
+            num_shots=20,
+            data_path=os.environ.get("SGLANG_GSM8K_DATA_PATH"),
+        )
         tokenizer = AutoTokenizer.from_pretrained(self.model, trust_remote_code=True)
         # Keep the shared prefix before sending requests so every question still crosses
         # the 2176-token bound.
