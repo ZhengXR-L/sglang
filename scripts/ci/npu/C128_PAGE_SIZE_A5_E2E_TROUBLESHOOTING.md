@@ -2,6 +2,14 @@
 
 本文记录在 Ascend A5 上运行 `test_npu_c128_page_size.py` 时遇到的问题。用例使用 DeepSeek-V4-Flash W8A8、NPU DSV4 attention 和 `--c128-page-size 16`，以 100 道 GSM8K 题检查跨 C128 物理页推理及答案正确率。
 
+| 阶段 | 关键报错或现象 | 处理 |
+| --- | --- | --- |
+| 模型加载 | tokenizer 无法实例化 | 补齐与权重匹配的 tokenizer 文件 |
+| MoE graph capture | FP8 激活与 INT8 权重不匹配 | 将 DeepEP 分发设为 BF16 |
+| 首次 attention metadata | `num_heads_q should be 64 or 128, but got 8` | 8 卡设置 `--attn-dp-size 8` |
+| GSM8K 数据加载 | 代理证书链校验失败 | 使用本地官方 `test.jsonl`，或配置可信 CA |
+| 服务启动后 | `post-warmup freeze_gc failed` | 本次为非致命警告；以请求和 pytest 结果判断 |
+
 ## 运行前提
 
 - 模型目录包含与权重匹配、能由 `AutoTokenizer.from_pretrained` 加载的 tokenizer 文件。
@@ -71,10 +79,12 @@ errno[161002] num_heads_q should be 64 or 128, but got 8
 **处理：** 本次验证将官方 GSM8K `test.jsonl` 下载到容器本地。可在包含 `SGLANG_GSM8K_DATA_PATH` 支持的用例中指定：
 
 ```bash
-export SGLANG_GSM8K_DATA_PATH=/实际路径/test.jsonl
+mkdir -p /tmp/gsm8k
+curl -fL https://raw.githubusercontent.com/openai/grade-school-math/master/grade_school_math/data/test.jsonl -o /tmp/gsm8k/test.jsonl
+export SGLANG_GSM8K_DATA_PATH=/tmp/gsm8k/test.jsonl
 ```
 
-旧版用例的 `download_and_cache_file` 会直接复用 `/tmp/test.jsonl`，因此也可以把已校验的官方文件放在那里。若仍希望通过代理在线下载，应为 `requests` 配置受信任的 CA bundle，并用 Python `requests.get()` 验证；不建议关闭证书校验。
+若容器内下载仍因证书失败，可在信任官方地址的其他机器下载，再将文件传入容器。旧版用例的 `download_and_cache_file` 会直接复用 `/tmp/test.jsonl`，因此也可以把已校验的官方文件放在那里。若仍希望通过代理在线下载，应为 `requests` 配置受信任的 CA bundle，并用 Python `requests.get()` 验证；不建议关闭证书校验。
 
 ## 5. `post-warmup freeze_gc failed` 警告
 
@@ -93,6 +103,8 @@ GSM8K: score=0.970, requests=100, min_prompt_tokens=3637, prefix_tokens=3606, pa
 
 用例要求 `score >= 0.93`，并检查每个服务端上报的 prompt token 数均大于 `128 * (16 + 1) = 2176`。本次最短 prompt 为 3637 tokens，满足跨页条件。此结果说明**这组 A5 配置下的端到端用例通过**；`post-warmup freeze_gc failed` 没有改变 pytest 结果。
 
+该用例通过服务端 token 统计和答案正确率验证跨页推理；它没有单独读取 NPU 内部的 C128 页表或算子计数。
+
 ## 复现命令
 
 确保 A5 容器中的用例已经加入 `--attn-dp-size 8`，模型 tokenizer 可加载，GSM8K 数据文件存在，然后在仓库根目录执行：
@@ -101,7 +113,7 @@ GSM8K: score=0.970, requests=100, min_prompt_tokens=3637, prefix_tokens=3606, pa
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export SGLANG_DSV4_W8A8_MODEL_PATH=/home/weights/DeepSeek-V4-Flash-0731-w8a8
 export SGLANG_DEEPEP_BF16_DISPATCH=1
-export SGLANG_GSM8K_DATA_PATH=/实际路径/test.jsonl
+export SGLANG_GSM8K_DATA_PATH=/tmp/gsm8k/test.jsonl
 
 set -o pipefail
 bash scripts/ci/npu/run_c128_page_size_tests.sh e2e 2>&1 | tee /tmp/c128-a5.log
