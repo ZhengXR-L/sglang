@@ -62,15 +62,6 @@ SERVER_ARGS = [
     "--disable-radix-cache",
     "--random-seed",
     "0",
-    # NEXTN speculative decoding (align with the passing qry-20260909f config).
-    "--speculative-algorithm",
-    "NEXTN",
-    "--speculative-num-steps",
-    "3",
-    "--speculative-eagle-topk",
-    "1",
-    "--speculative-num-draft-tokens",
-    "4",
 ]
 
 
@@ -115,7 +106,7 @@ class TestNPUQwen4ExpQSAIndexerBF16(GSM8KMixin, GSM8KAscendMixin, CustomTestCase
     # test_gsm8k (sgl_eval) wins over GSM8KAscendMixin's completion version.
     gsm8k_backend = "sgl_eval"
     gsm8k_thinking = True
-    gsm8k_num_examples = 5
+    gsm8k_num_examples = 100
     gsm8k_num_threads = 32
     gsm8k_max_tokens = 16384
     gsm8k_score_threshold = 0.90
