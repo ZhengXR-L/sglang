@@ -180,17 +180,32 @@ def set_default_server_args(args: "ServerArgs"):
             "set_default_server_args",
             hicache_io_backend="kernel_ascend",
         )
-        if use_mla_backend(args):
+        # An explicit layer_first layout is respected on NPU (pure L1/L2 path);
+        # only project the page-first default when the user did not ask for it.
+        if cfg.hicache_mem_layout != "layer_first":
             declare_resolution(
                 args,
                 "set_default_server_args",
-                hicache_mem_layout="page_first_kv_split",
+                hicache_mem_layout=(
+                    "page_first_kv_split"
+                    if use_mla_backend(args)
+                    else "page_first_direct"
+                ),
             )
-        else:
-            declare_resolution(
-                args,
-                "set_default_server_args",
-                hicache_mem_layout="page_first_direct",
+        # layer_first does not support the memfabric / AscendC fused IO path,
+        # whose metadata hard-codes page-first striding; fail at startup rather
+        # than on the first L2 transfer.
+        from sglang.srt.mem_cache.pool_host.npu_memfabric import (
+            memfabric_host_memory_enabled,
+        )
+
+        if (
+            cfg.hicache_mem_layout == "layer_first"
+            and memfabric_host_memory_enabled()
+        ):
+            raise ValueError(
+                "layer_first layout does not support "
+                "SGLANG_HICACHE_HOST_MEM_BACKEND=memfabric in this release"
             )
 
 

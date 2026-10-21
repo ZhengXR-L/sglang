@@ -179,6 +179,20 @@ def resolve_layout_io_compatibility(server_args: Any):
 
 def resolve_storage_layout_compatibility(server_args: Any):
     cfg = resolving_view(server_args)
+    # NPU's layer_first only covers the pure L1/L2 path this release: reject any
+    # non-empty L3 storage backend at config time instead of failing silently at
+    # runtime on get_data_page/set_from_flat_data_page. Restrict to kernel_ascend
+    # (NPU-only IO backend) so GPU's direct/kernel rewrites below are untouched.
+    if (
+        cfg.hicache_mem_layout == "layer_first"
+        and cfg.hicache_storage_backend is not None
+        and cfg.hicache_io_backend == "kernel_ascend"
+    ):
+        raise ValueError(
+            "layer_first layout does not support any HiCache storage backend on "
+            "NPU in this release (got --hicache-storage-backend "
+            f"{cfg.hicache_storage_backend!r}); use a page_first layout for L3."
+        )
     if (
         cfg.hicache_storage_backend not in ("mooncake", "npu_memcache")
         or cfg.hicache_mem_layout != "layer_first"

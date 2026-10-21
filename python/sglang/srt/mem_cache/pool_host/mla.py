@@ -459,13 +459,25 @@ class MLATokenToKVPoolHost(HiSparseHostPoolMixin, HostKVCache):
             pin_memory=self.pin_memory,
             allocator=self.allocator,
         )
-        self.v_buffer = alloc_func(
-            (*base_dims, self.qk_rope_head_dim),
-            dtype=self.dtype,
-            device=self.device,
-            pin_memory=self.pin_memory,
-            allocator=self.allocator,
-        )
+        # FP8 DSA packs the V component into the device k_buffer, so `v_width`
+        # is 0 there; allocate a 5-D zero-element tensor (not None) to keep the
+        # operator's V operand 5-D while the `numel()==0` branch skips the copy.
+        # A plain empty tensor skips the host allocator, which rejects 0-byte
+        # reservations.
+        if native.v_width == 0:
+            self.v_buffer = torch.empty(
+                (*base_dims, 0),
+                dtype=self.dtype,
+                device=self.device,
+            )
+        else:
+            self.v_buffer = alloc_func(
+                (*base_dims, native.v_width),
+                dtype=self.dtype,
+                device=self.device,
+                pin_memory=self.pin_memory,
+                allocator=self.allocator,
+            )
         self.index_k_buffer = None
         if native.index_k is not None:
             self.index_k_buffer = alloc_func(
@@ -740,17 +752,35 @@ class MLATokenToKVPoolHost(HiSparseHostPoolMixin, HostKVCache):
         is_draft,
         direction,
     ) -> None:
-        """Transfer one layer's split K/V between device and host (N=1).
+        """Transfer one layer's split K/V (+ indexer) between device and host.
 
         Maps the global controller layer ID to a per-info native buffer and a
         host row via ``_host_layer_by_controller``, then exchanges a single
-        5-D view in ``layer_first`` order. Indexer components are added in a
-        later step; here only K/V are moved.
+        5-D view in ``layer_first`` order. When the layer owns an indexer
+        cache, its ``index_k`` / ``index_k_scale`` are transferred in the same
+        call; ``_indexer_slot_range_for_layer`` maps device layer -> slot.
         """
         info_index = layer_id - self._device_layer_num + 1 if is_draft else 0
         native = self._native_infos[info_index].native_buffers()
         device_layer_id = 0 if is_draft else layer_id
         host_layer_id = self._host_layer_by_controller[layer_id]
+
+        device_index_k = None
+        host_index_k = None
+        device_index_k_scale = None
+        host_index_k_scale = None
+        index_slot, index_num = self._indexer_slot_range_for_layer(
+            native, device_layer_id
+        )
+        if index_num == 1:
+            device_index_k = native.index_k[index_slot].unsqueeze(0)
+            host_index_k = self.index_k_buffer[index_slot].unsqueeze(1)
+            if native.index_scales is not None:
+                device_index_k_scale = native.index_scales[index_slot].unsqueeze(0)
+                host_index_k_scale = self.index_k_scale_buffer[
+                    index_slot
+                ].unsqueeze(1)
+
         transfer_kv_dim_exchange(
             device_indices=device_indices,
             host_indices=host_indices,
@@ -758,6 +788,10 @@ class MLATokenToKVPoolHost(HiSparseHostPoolMixin, HostKVCache):
             host_k=self.k_buffer[host_layer_id].unsqueeze(1),
             device_v=native.v[device_layer_id].unsqueeze(0),
             host_v=self.v_buffer[host_layer_id].unsqueeze(1),
+            device_index_k=device_index_k,
+            host_index_k=host_index_k,
+            device_index_k_scale=device_index_k_scale,
+            host_index_k_scale=host_index_k_scale,
             page_size=self.page_size,
             direction=direction,
         )
