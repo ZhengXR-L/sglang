@@ -128,7 +128,7 @@ device层-first ↔ host 页-first 的转换能力。
 
 ## 5. 涉及关键文件
 
-### sglang 主仓库（当前分支 `qsa-indexer-dtype`）
+### sglang 主仓库（当前分支 `layer_first_ascendc_sparse_copy`）
 
 | 文件 | 作用 |
 |------|------|
@@ -143,13 +143,9 @@ device层-first ↔ host 页-first 的转换能力。
 | `python/sglang/srt/mem_cache/memory_pool_host.py` | DSv4 专用 pool（已有 layer_first+kernel_ascend 先例） |
 | `python/sglang/srt/mem_cache/storage/npu_memcache/npu_memcache_store.py` | NPU 存储后端（声明不支持 layer_first） |
 
-### sgl-kernel-npu 仓库（当前分支 `main`）
+### sgl-kernel-npu 仓库
 
-| 文件 | 作用 |
-|------|------|
-| `python/sgl_kernel_npu/sgl_kernel_npu/kvcacheio.py` | `transfer_kv_dim_exchange` 等 NPU 传输 op 封装 |
-| `csrc/transfer_kv_dim_exchange/` | `transfer_kv_dim_exchange` 算子实现（2D strided copy） |
-| `csrc/pytorch_extensions.cpp` | 算子注册 |
+本方案无改动（§10.4）。
 
 ## 6. 多模型适配范围
 
