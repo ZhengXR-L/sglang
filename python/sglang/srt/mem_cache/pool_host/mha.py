@@ -512,6 +512,41 @@ class MHATokenToKVPoolHost(HostKVCache):
                             page_size=self.page_size,
                             direction=TransferDirection.H2D,
                         )
+            elif self.layout == "layer_first":
+                # Ascend-specific: copy only the requested layer (N=1) from the
+                # layer_first host buffer. Locate the layer across target/draft
+                # buffer infos without iterating over every layer.
+                remaining = host_layer_id
+                for info in self._buffer_infos:
+                    device_k, device_v = info.transfer_buffers()
+                    n_layer = device_k.shape[0]
+                    if remaining < n_layer:
+                        transfer_kv_dim_exchange(
+                            device_indices=device_indices,
+                            host_indices=host_indices,
+                            device_k=device_k[remaining].unsqueeze(0),
+                            host_k=self.k_buffer[host_layer_id]
+                            .view(
+                                self.page_num,
+                                self.page_size,
+                                self.head_num,
+                                self.head_dim,
+                            )
+                            .unsqueeze(1),
+                            device_v=device_v[remaining].unsqueeze(0),
+                            host_v=self.v_buffer[host_layer_id]
+                            .view(
+                                self.page_num,
+                                self.page_size,
+                                self.head_num,
+                                self.head_dim,
+                            )
+                            .unsqueeze(1),
+                            page_size=self.page_size,
+                            direction=TransferDirection.H2D,
+                        )
+                        break
+                    remaining -= n_layer
             else:
                 raise ValueError(f"Unsupported layout: {self.layout}")
         else:
@@ -659,6 +694,42 @@ class MHATokenToKVPoolHost(HostKVCache):
                         page_size=self.page_size,
                         direction=TransferDirection.D2H,
                     )
+            elif self.layout == "layer_first":
+                # The exchange operator copies a single layer per call when the
+                # host side is layer_first (N=1). layer_first host buffers carry
+                # no page dimension, so view each host layer as
+                # [pages, 1, P, H, D] and each device layer as [1, dev_pages, P, H, D].
+                layer_start = 0
+                for info in self._buffer_infos:
+                    device_k, device_v = info.transfer_buffers()
+                    n_layer = device_k.shape[0]
+                    for l in range(n_layer):
+                        host_layer_id = layer_start + l
+                        transfer_kv_dim_exchange(
+                            device_indices=device_indices,
+                            host_indices=host_indices,
+                            device_k=device_k[l].unsqueeze(0),
+                            host_k=self.k_buffer[host_layer_id]
+                            .view(
+                                self.page_num,
+                                self.page_size,
+                                self.head_num,
+                                self.head_dim,
+                            )
+                            .unsqueeze(1),
+                            device_v=device_v[l].unsqueeze(0),
+                            host_v=self.v_buffer[host_layer_id]
+                            .view(
+                                self.page_num,
+                                self.page_size,
+                                self.head_num,
+                                self.head_dim,
+                            )
+                            .unsqueeze(1),
+                            page_size=self.page_size,
+                            direction=TransferDirection.D2H,
+                        )
+                    layer_start += n_layer
             else:
                 raise ValueError(f"Unsupported layout: {self.layout}")
         else:

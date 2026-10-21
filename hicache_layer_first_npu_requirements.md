@@ -1,0 +1,412 @@
+# 需求记录：NPU HiCache L1→L2 传输路径支持 layer_first 布局
+
+> 记录时间：2026-10-19
+> 目标完成时间：2026-10-30（功能 + 最低标准性能验证 + 提 PR）
+
+## 1. 需求概述
+
+在 **NPU（昇腾）场景**下，实现 HiCache **L1→L2 传输路径**对 **`layer_first` 数据布局**的支持，与社区主流实现对齐。
+
+- L1：设备侧（NPU）KV Cache 内存池
+- L2：主机侧内存池（host pool）及其存储后端
+
+验收要求：
+1. `layer_first` 布局下 L1 + L2 前缀缓存（HiCache）功能正常可用；
+2. 端到端性能不低于 `page_first` 布局；
+3. 10 月 30 日前完成功能开发与最低标准的性能验证，并提交 PR。
+
+## 2. 背景与关键概念
+
+### 2.1 HiCache 分层
+
+```
+   L1: 设备内存池 (NPU KV Cache)
+        │  backup (D2H 写回)  /  load (H2D 预取)
+        ▼
+   L2: 主机内存池 (host pool)  +  存储后端 (mooncake / npu_memcache / ...)
+```
+
+### 2.2 传输后端 (`hicache_io_backend`)
+
+| backend | 说明 |
+|---------|------|
+| `direct` | 直接 copy（CPU 侧张量） |
+| `kernel`  | CUDA/HIP/XPU 的 `sgl_kernel` 传输 kernel |
+| `kernel_ascend` | NPU 专用，走 `sgl_kernel_npu` 的 `transfer_kv_dim_exchange` |
+
+### 2.3 主机内存布局 (`hicache_mem_layout`)
+
+| 布局 | host pool 组织方式 | 说明 |
+|------|--------------------|------|
+| `layer_first` | `[layer][page][...]`，每层独立连续 buffer | 经典布局，社区默认之一 |
+| `page_first` | `[page][layer][...]` | 单一大 tensor，页面优先 |
+| `page_first_direct` | `[page][layer][1][...]` | direct IO 用 |
+| `page_first_kv_split` | K/V 分离的 page-first | MLA NPU 专用 |
+
+参数定义见 `arg_groups/fields/memory.py`（`hicache_mem_layout` 默认值为 `page_first`）。
+
+## 3. 现状分析（Gap）
+
+### 3.1 NPU 当前强制 page_first 系布局
+
+`hardware_backend/npu/utils.py`（`set_default_server_args`）在启用
+`enable_hierarchical_cache` 或 `disaggregation_decode_enable_offload_kvcache` 时：
+
+- 强制 `hicache_io_backend = "kernel_ascend"`
+- MLA 模型 → `hicache_mem_layout = "page_first_kv_split"`
+- 非 MLA 模型 → `hicache_mem_layout = "page_first_direct"`
+
+即 **NPU 场景下目前完全没有暴露 `layer_first` 布局的能力**。
+
+### 3.2 `kernel_ascend` 传输分支只处理 page_first 系布局
+
+通用 host pool 的 `backup_from_device_all_layer` / `load_to_device_per_layer` 中，
+`io_backend == "kernel_ascend"` 分支仅实现 `page_first_direct`，未见 `layer_first`：
+
+- `mem_cache/pool_host/mha.py`
+  - `load_to_device_per_layer`：`kernel_ascend` 下 `if self.layout == "page_first_direct"`，否则抛 `Unsupported layout`
+  - `backup_from_device_all_layer`：`kernel_ascend` 下 `if self.layout == "page_first_direct"`
+- `mem_cache/pool_host/mla.py`：`kernel_ascend` 分支同样只走 page-first 逻辑
+- `mem_cache/pool_host/unified.py`：`prepare_transfer_indices` 的 `kernel_ascend` 分支直接
+  `return host_indices, device_indices.cpu()`，未区分 `layer_first`
+
+### 3.3 存储后端对 layer_first 的限制
+
+`arg_groups/hicache_hook.py` 的 `resolve_storage_layout_compatibility()`：
+
+```
+Mooncake/Ascend MemCache storage backend does not support layer_first layout ...
+```
+
+当 `hicache_storage_backend` 为 `mooncake` / `npu_memcache` 且布局为 `layer_first` 时，
+实际改写行为（对照 `hicache_hook.py` L182-204）：
+- `direct` 后端 → 改写为 `page_first_direct`；
+- `kernel` 后端 → 改写为 `page_first`；
+- `kernel_ascend` → 保持 `layer_first`（仅 declare 同值 + 打误导性 warning，实际未切换）。
+
+即 **NPU 存储后端（npu_memcache / Ascend MemCache）当前声明不支持 layer_first**；但对
+`kernel_ascend + layer_first + mooncake/npu_memcache` 组合，现有代码是「放行」而非「拦截」，
+仍存隐患。且现有拦截范围只覆盖 `mooncake`/`npu_memcache`，`file`/`nixl`/`hf3fs` 等其余
+`hicache_storage_backend` 会一路通过配置、运行时才失败（详见设计文档 §7.3）。本次设计改为：
+**配置解析阶段对 `layer_first + 任意非空 L3 backend` 显式抛错**——该拦截**限定在 NPU /
+`kernel_ascend` 路径**（`resolve_storage_layout_compatibility` 是跨设备通用函数，须避免误伤 GPU
+的既有行为），本期 NPU 的 layer_first 仅限纯 L1/L2。
+
+### 3.4 已有部分 layer_first 先例（可作为参照）
+
+`mem_cache/memory_pool_host.py` 中的 DeepSeek V4 专用 pool 已实现 `kernel_ascend` +
+`layer_first`/`page_first` 两种布局（通过 `_host_page_view()` 生成 `[pages,1,P,1,dim]`
+视图，再调用 `transfer_kv_dim_exchange`）：
+
+- `DeepSeekV4PagedHostPool.backup_from_device_all_layer`（`kernel_ascend` 分支）
+- `DeepSeekV4PagedHostPool.load_to_device_per_layer`
+- `DeepSeekV4StateHostPool` 同上
+
+这证明底层 `transfer_kv_dim_exchange` 已具备配合 layer_first 视图工作的能力，
+可复用到通用 MHA/MLA/unified host pool。
+
+## 4. 社区主流实现参考（对齐目标）
+
+社区（sglang 上游开源项目）在 CUDA/HIP 侧对 `layer_first` 布局的 L1→L2 传输，
+使用 `sgl_kernel.kvcacheio` 的以下 kernel（`mem_cache/pool_host/mha.py` 等）：
+
+- 全层 D2H：`transfer_kv_all_layer`（layer_first，全层一次性传输）
+- 单层 H2D：`transfer_kv_per_layer`（layer_first）
+- MLA 变体：`transfer_kv_all_layer_mla` / `transfer_kv_per_layer_mla`
+- JIT 变体：`jit_transfer_hicache_all_layer` / `jit_transfer_hicache_one_layer`
+
+NPU 对齐思路：在 `kernel_ascend` 后端下，为通用 host pool 补齐 `layer_first` 分支，
+复用 `transfer_kv_dim_exchange`（sgl_kernel_npu，底层走 `aclrtMemcpy2dAsync` 的 2D
+strided copy），使 `layer_first` 与 `page_first` 在功能与性能上等价。
+
+NPU 侧已有布局转换先例：`sgl_kernel_npu.kvcacheio.transfer_mamba_state` 注释明确展示了
+device层-first ↔ host 页-first 的转换能力。
+
+## 5. 涉及关键文件
+
+### sglang 主仓库（当前分支 `qsa-indexer-dtype`）
+
+| 文件 | 作用 |
+|------|------|
+| `python/sglang/srt/arg_groups/fields/memory.py` | `hicache_mem_layout` / `hicache_io_backend` 参数定义 |
+| `python/sglang/srt/arg_groups/hicache_hook.py` | 布局与 IO/存储后端的兼容性归一化 |
+| `python/sglang/srt/hardware_backend/npu/utils.py` | NPU 默认参数解析（当前强制 page_first） |
+| `python/sglang/srt/mem_cache/pool_host/mha.py` | 通用 MHA host pool 传输（gap 所在） |
+| `python/sglang/srt/mem_cache/pool_host/mla.py` | 通用 MLA host pool 传输（gap 所在） |
+| `python/sglang/srt/mem_cache/pool_host/unified.py` | 统一 host pool（gap 所在） |
+| `python/sglang/srt/mem_cache/pool_host/page_unified.py` | page 统一 host pool |
+| `python/sglang/srt/mem_cache/pool_host/base.py` | host pool 基类 |
+| `python/sglang/srt/mem_cache/memory_pool_host.py` | DSv4 专用 pool（已有 layer_first+kernel_ascend 先例） |
+| `python/sglang/srt/mem_cache/storage/npu_memcache/npu_memcache_store.py` | NPU 存储后端（声明不支持 layer_first） |
+
+### sgl-kernel-npu 仓库（当前分支 `main`）
+
+| 文件 | 作用 |
+|------|------|
+| `python/sgl_kernel_npu/sgl_kernel_npu/kvcacheio.py` | `transfer_kv_dim_exchange` 等 NPU 传输 op 封装 |
+| `csrc/transfer_kv_dim_exchange/` | `transfer_kv_dim_exchange` 算子实现（2D strided copy） |
+| `csrc/pytorch_extensions.cpp` | 算子注册 |
+
+## 6. 多模型适配范围
+
+需覆盖以下模型的 NPU HiCache（含 layer_first）能力：
+
+| 模型 | KV 结构（线索） | 对应 host pool | 当前 NPU 布局 | layer_first 适配点 |
+|------|----------------|----------------|---------------|--------------------|
+| GLM-5.x | MHA/GQA（标准 attention） | `pool_host/mha.py` | `page_first_direct` | 补齐 `kernel_ascend` + `layer_first` 分支 |
+| GLM-5.3-Flash | MHA（Flash 变体） | `pool_host/mha.py` | `page_first_direct` | 同上 |
+| Kimi-K3 | MLA + 线性注意力（`KimiK3MLAAttention`，含 linear/delta attention，`uses_ssm_state` 命中） | 双路径：MLA KV → `pool_host/mla.py`；SSM state → `pool_host/mamba.py`（`MambaPoolHost`） | `page_first_kv_split` | MLA 侧补齐 `kernel_ascend` + `layer_first` 分支；SSM 侧复用 `MambaPoolHost` 已有 layer_first+kernel_ascend，仅回归 |
+| DeepSeek-V4-Flash | DSv4 paged（MHC / indexer） | `memory_pool_host.py` 的 DSv4 专用 pool | `page_first_*` | 已有 layer_first 先例，重点验证与统一 |
+| DeepSeek-V4.1-Flash | DSv4 paged（MHC / indexer） | `memory_pool_host.py` 的 DSv4 专用 pool | `page_first_*` | 同上 |
+
+适配注意点：
+
+1. **MHA 与 MLA 分开实现**：两类 host pool 的 layer_first 布局组织不同
+   （K/V 是否分离、`item_size`/`token_stride_size` stride 不同），需分别在
+   `mha.py`、`mla.py` 补齐 `kernel_ascend` 分支并各自回归。
+2. **DSv4 系列复用先例**：`DeepSeekV4PagedHostPool` / `DeepSeekV4StateHostPool`
+   已实现 `kernel_ascend` + `layer_first`，重点是验证与通用 pool 保持行为一致，
+   避免重复造轮子。
+3. **附带缓存**：部分模型（如 DSv4 indexer）存在 `index_k` / `index_k_scale` 等
+   附带缓存，需确认其在 layer_first 下的传输参数
+   （`transfer_kv_dim_exchange` 的 `device_index_k` / `device_index_k_scale`）。
+4. **模型归属需逐一确认**：各模型最终走 MLA 还是 MHA backend、单/多 token 粒度，
+   需在实现前以各模型实际 config 为准确认，避免按名称臆断。
+5. **Kimi-K3 的 SSM state 是独立路径**：Kimi-K3 同时保有线性注意力（Delta）的 recurrent/conv
+   状态，由 `MambaPoolHost`（`pool_host/mamba.py`）承载（`kv_cache_builder.py::uses_ssm_state`
+   通过 `kimi_linear_config` 命中），`layout` 默认 `layer_first` 且已有 kernel_ascend 逐层复制
+   路径。验收须覆盖「L2 前缀命中后恢复 SSM state」，只看 MLA K/V 搬运无法证明 Kimi-K3 达标（§11.2）。
+
+## 7. 验收标准
+
+1. **功能**：`--hicache-mem-layout layer_first`（+ `kernel_ascend`）在 NPU 下可正常启动，
+   L1→L2 写回（backup）与 L2→L1 预取（load）正确，前缀缓存命中/回退结果与 page_first 一致；
+   覆盖 MHA（GLM-5.x / GLM-5.3-Flash）、MLA（Kimi-K3）、DSv4（V4-Flash / V4.1-Flash）三类模型路径；
+   Kimi-K3 除 MLA K/V 外还须验证「L2 前缀命中后恢复线性注意力（SSM）状态」正确（§11.2）。
+2. **性能**：`layer_first` 布局端到端性能不低于 `page_first` 布局（最低标准性能验证即可）。
+3. **范围边界（本期）**：layer_first 仅限纯 L1/L2——不接任何 L3 存储后端（`--hicache-storage-backend`
+   非空时启动即报错），且与 `SGLANG_HICACHE_HOST_MEM_BACKEND=memfabric` 互斥（启动即报错）。
+4. **交付**：10 月 30 日前完成上述功能与最低标准性能验证，并提交 PR。
+
+## 8. 时间节点
+
+| 节点 | 内容 |
+|------|------|
+| 2026-10-30 前 | 完成功能开发 |
+| 2026-10-30 前 | 完成最低标准性能验证 |
+| 2026-10-30 前 | 提出 PR |
+
+## 9. 待确认事项
+
+- [ ] 社区"主流实现"是否特指某个上游 PR / 具体 branch（需进一步确认对齐基线）
+- [x] L3 存储后端：**已定——本期仅覆盖 L1/L2 host pool（不含 L3）**。任意非空
+      `--hicache-storage-backend`（不限于 npu_memcache/mooncake）在 NPU `kernel_ascend` 下与
+      `layer_first` 组合，配置解析阶段即抛错（设计文档 §7.3）。
+- [x] 各模型 backend 归属：**已定**——GLM-5.x / GLM-5.3-Flash 走 `mha.py`；Kimi-K3 走 MLA
+      (`mla.py`) + SSM state (`MambaPoolHost`) 双路径；DeepSeek-V4-Flash / V4.1-Flash 走 DSv4 专用池。
+- [x] DSv4 indexer 附带缓存：**已定——不在本次改动范围**。DSv4 走 `DeepSeekV4PagedHostPool`
+      既有 layer_first+kernel_ascend 先例，仅做回归；通用 `mla.py` 的 indexer（`is_deepseek_dsa` 族）
+      作为可选扩展点。
+- [x] 性能验收基准：**已定**——对比模型与序列长度、预取命中、吞吐/时延指标见 §11.3 及设计文档 §10.1
+      （含短序列 / 单 token 逐层 launch 开销场景）。
+
+## 10. 变更清单
+
+分三块改动 + 一个（可能）kernel 调整。
+
+### 10.1 布局选择 / 开关（让 NPU 能选 layer_first）
+
+| 文件 | 位置 | 改动 |
+|------|------|------|
+| `python/sglang/srt/hardware_backend/npu/utils.py` | `set_default_server_args`（L173-194） | 仅当 `cfg.hicache_mem_layout != "layer_first"` 时才投影默认（MLA→`page_first_kv_split`、否则→`page_first_direct`）；显式 `layer_first` 跳过覆盖、放行 |
+| `python/sglang/srt/arg_groups/hicache_hook.py` | `resolve_storage_layout_compatibility`（L180-204） | 配置解析阶段对 `layer_first + 任意非空 L3 + io_backend==kernel_ascend` 显式**抛错**（本期 NPU 仅纯 L1/L2）；纯 L1/L2 放行 layer_first；GPU 等其它设备行为不变 |
+
+> 判定方式（已定）：只判 `cfg.hicache_mem_layout == "layer_first"`（默认是 `page_first`，能反推出用户显式指定），
+> 不声称能识别其它显式 CLI 值；`declare_resolution` 的 stash 声明优先级高于 `_raw_input`（见设计文档 §7.2）。
+
+### 10.2 传输实现（补 `kernel_ascend` + `layer_first` 分支）
+
+通用 MHA/MLA pool 的 `kernel_ascend` 分支目前都只认 page-first 系布局（`unified.py` 的
+layer_first 属 page_unified 系，不在本期 MHA/MLA 必改范围，见 §6 表格）：
+
+| 文件 | 方法 | 缺口位置 |
+|------|------|----------|
+| `python/sglang/srt/mem_cache/pool_host/mha.py` | `backup_from_device_all_layer` | L649 起 `kernel_ascend` 仅 `page_first_direct` |
+| `python/sglang/srt/mem_cache/pool_host/mha.py` | `load_to_device_per_layer` | L495 起 `kernel_ascend` 仅 `page_first_direct` |
+| `python/sglang/srt/mem_cache/pool_host/mla.py` | `backup_from_device_all_layer` | L996 起仅 `page_first_kv_split` |
+| `python/sglang/srt/mem_cache/pool_host/mla.py` | `load_to_device_per_layer` | L762 起仅 `page_first_kv_split` |
+| `python/sglang/srt/mem_cache/pool_host/mla.py` | `_backup_from_device_per_layer`（层分片前置分流） | 当前 `if io_backend not in ("kernel","direct")` 拒绝 `kernel_ascend`，需新增 `kernel_ascend + layer_first` 分支 |
+
+> **并非「只补传输分支」**：
+> - MHA：`init_kv_buffer` 已是 K/V 分离（`dims=(2, layer_num, size, head_num, head_dim)`），
+>   layer_first 分配已就绪，**无需改分配**。
+> - MLA：现有 layer_first 是「合并记录」`[layer_num, size, 1, kv_cache_dim]`，不满足算子
+>   K/V 分离 5-D 契约（设计文档 §6.3），**需改 `init_kv_buffer` 分开分配** `k_buffer`/`v_buffer`
+>   （FP8 DSA 时 `v_buffer` 为 5-D 零元素空张量、`index_k_scale_buffer` 为 5-D）。
+> - D2H（`backup_from_device_all_layer`）内部遍历所有层；H2D（`load_to_device_per_layer`）只搬
+>   传入的 `layer_id`，禁止内部再循环所有层（避免层数²重复搬运）。
+
+### 10.3 复用 / 参照（不新增轮子）
+
+- `memory_pool_host.py` 的 `DeepSeekV4PagedHostPool._host_page_view()`（L351-372）是现成的
+  layer_first 写法：把 layer_first 的 `kv_buffer[l]` view 成 `[pages,1,P,1,dim]` 五维，
+  再逐层喂 `transfer_kv_dim_exchange`。10.2 的 mha/mla 应照此实现，必要时把
+  「layer_first → 5-D view」抽成公共 helper。
+
+### 10.4 sgl-kernel-npu（小改 wrapper，不动 C++ 算子）
+
+- `transfer_kv_dim_exchange` 算子本身已支持任意 5-D view（DSv4 已用），**C++ 无需改**。
+- **Python wrapper（`kvcacheio.py`）需小改**：`index_k`/`index_k_scale` 两段额外调用的空 V 占位
+  从一维 `torch.empty(0)` 改为 5-D 零元素张量 `torch.empty((*k.shape[:-1], 0), ...)`（L98-99/L115-116），
+  避免 C++ 无条件读 `sizes()[4]` 的越界（设计文档 §6.7）。对现有 `page_first_kv_split` 的 indexer
+  调用行为不变（`numel` 恒为 0）。
+
+### 10.5 建议落地顺序
+
+1. 抽象公共 helper：layer_first → 5-D 视图 + 单层搬运转译 `_transfer_one_layer`（内置层号映射 / index slot 映射 / 层分片前置分流）；
+2. MHA layer_first + 单测闭环；
+3. MLA layer_first（普通 BF16，含 indexer 逐层、层分片分支、`_size_per_token` 计入 indexer）+ 单测；
+4. FP8 DSA 特殊路径（空 V 只传 K）+ wrapper 空 V 占位改 5-D（10.4）；
+5. 开关（10.1）+ 端到端精度（含 Kimi-K3 SSM state 恢复回归）；
+6. 性能对比（长/短序列）+ CI 注册。
+
+## 11. 验收测试用例设计
+
+### 11.1 单元测试：布局搬运正确性（不依赖真实模型）
+
+放 `test/registered/unit/npu/mem_cache/`，参照 `test_unified_hicache_transfer_lifecycle.py` /
+`test_hicache_staged_write_back_dispatch.py` 的 dummy-pool 模式，对 MHA、MLA（含/不含 indexer）、
+FP8 DSA 各构造 `layout="layer_first"` 的 host pool + 已知内容的 device buffer：
+
+- 断言（通用）：
+  1. `backup_from_device_all_layer`（D2H，**内部遍历所有层**）后，host 的 `kv_buffer[l]` 逐层 == 预期值；
+  2. `load_to_device_per_layer`（H2D，**只搬传入的 `layer_id`，不循环所有层**）后，device buffer 正确复原；
+  3. **layer_first 与 page_first 写回/加载结果完全一致**（等价性对拍）；
+  4. 覆盖层分片路径：`_backup_from_device_per_layer` 的 `kernel_ascend` 分支能进入，不被「仅 kernel/direct」拒在门外。
+- MLA indexer 专测：构造带 `index_k`（及 `index_k_scale`）的子集层，逐层（N=1）传输，验证
+  ① `_indexer_slot_range_for_layer` 的 device 层号→index slot 映射正确；② host scale 为 5-D
+  `[num_indexer_layers, page_num, page_size, 1, 1]`；③ **「indexer 实际调用」**——wrapper 内
+  `index_k`/`index_k_scale` 两段子调用改用 5-D 零元素 V 占位（`kvcacheio.py` L98-99 / L115-116）后，
+  D2H/H2D 各跑一次，断言跳过空 V、不越界（对应设计文档 §6.7）。
+- FP8 DSA 专测：`v_width==0` 时 `v_buffer` 为 5-D 零元素空张量（非 `None`、不占容量），走
+  「只传 K」路径，断言 `numel()==0` 分支跳过 V 拷贝、无越界（对应设计文档 §6.6）。
+
+### 11.2 端到端功能 / 精度测试（NPU，覆盖多模型）
+
+放 `test/registered/npu/basic_function/HiCache/`，参照现有 `test_npu_hicache_mha.py` /
+`test_npu_hicache_mla.py` 的启动 + GSM8K 精度模式，新增 `--hicache-mem-layout layer_first`：
+
+| 用例 | 模型 | 断言 |
+|------|------|------|
+| MHA-layer_first | Qwen2.5-7B（GLM-5.x / GLM-5.3-Flash 作必跑验收模型） | GSM8K 精度 ≥ 阈值，且 == page_first 精度 |
+| MLA-layer_first | Kimi-K3（**必跑**；DeepSeek-V2-Lite 仅作无 SSM 的纯 MLA K/V CI 冒烟） | MLA K/V 精度 == page_first；**且前缀命中后恢复线性注意力（SSM）state 正确** |
+| DSv4-layer_first | V4-Flash / V4.1-Flash | 同上，只做回归（DSv4 专用池，非本次改动） |
+
+关键验证点：**同一模型下 `layer_first` 与 `page_first` 精度一致**（等价性），而非仅各自达标。
+
+**Kimi-K3 SSM state 恢复专项（必跑）**：Kimi-K3 同时有 Delta 线性注意力的 recurrent/conv 状态，
+由 `MambaPoolHost`（`pool_host/mamba.py`）承载，与 MLA K/V 是两条独立 host pool 分支。因此除上表
+MLA K/V 精度外，须**单独增加一次**「L2 前缀命中后恢复 SSM state」端到端：跑「前缀命中 → H2D 恢复
+temporal/conv state（+ side state）→ 续写解码」，校验续写 logits/精度与无缓存基准对齐。仅用
+DeepSeek-V2-Lite（无 SSM state）过测无法覆盖 `MambaPoolHost` 这条分支。
+
+### 11.3 性能验证（最低标准 = 端到端不低于 page_first）
+
+- 用 server benchmark（参照 `test/registered/kernels/benchmark/kvcache/bench_hicache.py`
+  或 server 压测）；
+- 同模型、同前缀命中率下对比 `layer_first` vs `page_first` 的吞吐/时延，
+  断言 **layer_first ≥ page_first**（或差异在允许阈值内，波动阈值 ±5%）；
+- **必须覆盖两类输入长度**：①长序列（prefill 数千 token，验证数据拷贝主导时基本持平）；
+  ②**短序列 / 单 token 续写**——layer_first 逐层（N=1）每层一次算子调用，launch 开销放大
+  `layer_num` 倍，是最可能不达标的点（设计文档 §9 风险项）。短序列不达标时须记录并回到 launch
+  开销优化项，**不得以长序列通过掩盖短序列回退**。
+
+### 11.4 CI 注册
+
+- 为新用例加 `register_npu_ci(...)`，复用现有 suite 分片（`base-b-test-*` / `nightly-*`），
+  PR 流水线走 `run_npu_pr_smoke`，nightly 走完整精度。
+
+## 12. 开发计划
+
+> 小步落地，每步可独立验证，并尽量配单测。sglang 侧路径相对 `sglang/` 包根
+> （与 §11 一致）；sgl-kernel-npu 为平级子仓库，路径相对仓库根。单测沿用
+> `test_hicache_staged_write_back_dispatch.py` 的 dummy-pool 模式。
+
+### 阶段 A：MHA 先跑通（无 indexer，风险最低）
+
+**Step 1 — MHA D2H（backup）layer_first 分支**
+- 改动：`python/sglang/srt/mem_cache/pool_host/mha.py::backup_from_device_all_layer` 的
+  `kernel_ascend` 分支，新增 `layout=="layer_first"` 子分支：逐层 5-D 视图 +
+  `transfer_kv_dim_exchange`（N=1）。
+- 单测：`test/registered/unit/npu/mem_cache/test_hicache_layer_first_mha.py`（新建）
+  —— 构造 dummy layer_first pool + 已知 device buffer，跑 backup，断言 `kv_buffer[l]` 逐层 ==
+  期望，并对拍 page_first 结果一致。
+
+**Step 2 — MHA H2D（load）layer_first 分支**
+- 改动：`mha.py::load_to_device_per_layer` 单层搬移（**只搬传入 `layer_id`，不内部循环**）。
+- 单测：同 Step 1 文件 —— backup 后 load 断言 device 复原；构造多层只 load 一层，断言其它层
+  device 未被写（验证单层语义）。
+
+### 阶段 B：MLA 拆分配 + 双向往返
+
+**Step 3 — MLA `init_kv_buffer` 分开分配 k/v**
+- 改动：`python/sglang/srt/mem_cache/pool_host/mla.py::init_kv_buffer` 在 `MLASplitBuffers` +
+  layer_first 下，把「合并记录」拆成独立 `k_buffer`/`v_buffer`；`_size_per_token` 容量闭合。
+- 单测：`test/registered/unit/npu/mem_cache/test_hicache_layer_first_mla.py`（新建）
+  —— 断言 k/v buffer 形状正确、token 容量与 page_first 一致。
+
+**Step 4 — MLA D2H（backup）分支（target + draft）**
+- 改动：`mla.py::backup_from_device_all_layer` 逐层 `_transfer_one_layer`，走
+  `_host_layer_by_controller` 映射 target/draft。
+- 单测：同 Step 3 文件 —— 含 draft 层的 pool，backup 断言 `k_buffer[host_layer_id]` / `v_buffer[...]`
+  逐层正确、映射不错层。
+
+**Step 5 — MLA H2D（load）分支（单层）**
+- 改动：`mla.py::load_to_device_per_layer` 单层搬移（含 target/draft 映射）。
+- 单测：同 Step 3 文件 —— backup+load 复原；单层语义（同 Step 2 断言）。
+
+**Step 6 — MLA 层分片前置分流**
+- 改动：`mla.py::_backup_from_device_per_layer` 新增 `kernel_ascend + layer_first` 分支
+  （当前被 `not in ("kernel","direct")` 拒之门外）。
+- 单测：同 Step 3 文件 —— 层分片场景（host 单层分片 < device 层数），断言不抛错、数据正确，
+  可加探针断言命中新分支。
+
+### 阶段 C：MLA 特殊路径（indexer / FP8 DSA / wrapper）
+
+**Step 7 — MLA indexer 逐层传输**
+- 改动：`mla.py` 的 `_transfer_one_layer` 内置 `index_k`/`index_k_scale`
+  （`_indexer_slot_range_for_layer` 做 device 层→slot 映射；host scale 取 5-D `[...1,1]` 单层视图）。
+- 单测：`test/registered/unit/npu/mem_cache/test_hicache_layer_first_mla_indexer.py`（新建）
+  —— 带 index_k/scale 的子集层 pool，断言 index_k/scale 搬运正确、slot 映射正确、scale 为 5-D。
+
+**Step 8 — FP8 DSA 空 V 路径**
+- 改动：`mla.py` 在 `v_width==0` 时 `v_buffer` 用 5-D 零元素空张量（非 `None`），走「只传 K」；
+  容量计算闭合。
+- 单测：同 Step 7 文件 —— DSA 场景容量闭合 + backup/load 不抛错 + 空 V 分支被跳过。
+
+**Step 9 — wrapper 空 V 占位改 5-D**
+- 改动：`sgl-kernel-npu/python/sgl_kernel_npu/sgl_kernel_npu/kvcacheio.py` L98-99 / L115-116 两处
+  `torch.empty(0)` → `torch.empty((*k.shape[:-1], 0), dtype=k.dtype, device=k.device)`。
+- 单测：`sgl-kernel-npu/tests/python/sgl_kernel_npu/test_transfer_kv_dim_exchange.py`（现有文件追加
+  indexer 空 V 用例）—— D2H/H2D 各一次跑 index_k/scale 子调用，断言空 V 跳过、`sizes()[4]` 不越界；
+  顺带回归现有 `page_first_kv_split` 不改行为。
+
+### 阶段 D：开关 + 集成
+
+**Step 10 — 布局开关 & L3 拒绝**
+- 改动：`python/sglang/srt/hardware_backend/npu/utils.py` 仅 `!= "layer_first"` 时投影默认；
+  `python/sglang/srt/arg_groups/hicache_hook.py` 对 `layer_first + 非空 L3 + kernel_ascend` 配置阶段抛错。
+- 单测：`test/registered/unit/npu/test_hicache_layer_first_config.py`（新建，参照
+  `test_sparsity_driven_kv_offload_config.py`）—— layer_first 不被覆盖；layer_first+非空 L3 抛错；GPU 路径行为不变。
+
+**Step 11 — 端到端精度（NPU 集成，非单测）**
+- 测试：`test/registered/npu/basic_function/HiCache/` 新增 layer_first 用例（参照
+  `test_npu_hicache_mha.py` / `test_npu_hicache_mla.py`）；Kimi-K3 追加「L2 前缀命中后恢复
+  SSM state」专项（走 `MambaPoolHost` 分支）。
+
+**Step 12 — 性能对比 + CI 注册**
+- 测试：`test/registered/kernels/benchmark/kvcache/bench_hicache.py` 或 server 压测，长/短序列两类；
+  `register_npu_ci(...)` 注册（§11.4）。
+
+**提交节奏建议**：Step 1-2、Step 3-6、Step 7-9、Step 10 各为一个可独立 review 的 commit（单测随
+改动一起提交）；Step 11-12 为集成门禁，不混入前面的功能 commit。

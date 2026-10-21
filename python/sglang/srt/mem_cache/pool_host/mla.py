@@ -181,7 +181,10 @@ class MLATokenToKVPoolHost(HiSparseHostPoolMixin, HostKVCache):
                 self._native_infos = infos
                 native = self._native_buffers
                 index_layers = len(native.index_layer_indices)
-                if layout == "page_first_kv_split" and native.index_k is not None:
+                if (
+                    layout in ("page_first_kv_split", "layer_first")
+                    and native.index_k is not None
+                ):
                     self._size_per_token += (
                         native.index_width * self.dtype.itemsize * index_layers
                     )
@@ -286,6 +289,11 @@ class MLATokenToKVPoolHost(HiSparseHostPoolMixin, HostKVCache):
 
     def init_kv_buffer(self):
         if self.layout == "layer_first":
+            if self._native_buffers is not None:
+                # NPU MLA split: allocate k/v (and indexer) separately in
+                # [layer, page, P, 1, width] order so each layer can be copied
+                # with N=1. Mirrors page_first_kv_split, swapping page/layer.
+                return self._init_layer_first_kv_split_buffer()
             dims = (
                 self.layer_num,
                 self.size,
@@ -425,6 +433,61 @@ class MLATokenToKVPoolHost(HiSparseHostPoolMixin, HostKVCache):
             ),
         )
         return buffer
+
+    def _init_layer_first_kv_split_buffer(self):
+        """Allocate split k/v (and indexer) buffers in layer-first order.
+
+        Reuses page_first_kv_split's per-component widths, only transposing the
+        page and layer axes so `transfer_kv_dim_exchange` can address a single
+        host layer `[page_num, P, 1, width]` (N=1) for each device layer.
+        """
+        native = self._native_buffers
+        num_indexer_layers = len(native.index_layer_indices)
+        base_dims = (self.layer_num, self.page_num, self.page_size, 1)
+        indexer_dims = (num_indexer_layers, self.page_num, self.page_size, 1)
+        alloc_func = ALLOC_MEMORY_FUNCS[self._transfer_device.type]
+        # FP8 DSA packs latent+RoPE+scale into the device k_buffer; mirror the
+        # packed width so the 2D memcpy row width matches.
+        if self.dsa_kv_cache_store_fp8:
+            k_width = native.k_width
+        else:
+            k_width = self.kv_lora_rank
+        self.k_buffer = alloc_func(
+            (*base_dims, k_width),
+            dtype=self.dtype,
+            device=self.device,
+            pin_memory=self.pin_memory,
+            allocator=self.allocator,
+        )
+        self.v_buffer = alloc_func(
+            (*base_dims, self.qk_rope_head_dim),
+            dtype=self.dtype,
+            device=self.device,
+            pin_memory=self.pin_memory,
+            allocator=self.allocator,
+        )
+        self.index_k_buffer = None
+        if native.index_k is not None:
+            self.index_k_buffer = alloc_func(
+                (*indexer_dims, native.index_width),
+                dtype=self.dtype,
+                device=self.device,
+                pin_memory=self.pin_memory,
+                allocator=self.allocator,
+            )
+        # Host-side mirror of the NPU quantized-Indexer FP32 scale cache.
+        self.index_k_scale_buffer = None
+        if native.index_scales is not None:
+            self.index_k_scale_buffer = alloc_func(
+                (*indexer_dims, 1),
+                dtype=torch.float32,
+                device=self.device,
+                pin_memory=self.pin_memory,
+                allocator=self.allocator,
+            )
+        # Return k_buffer so the layer_first data_refs init (`kv_buffer[i]`)
+        # yields one [page_num, P, 1, k_width] view per layer.
+        return self.k_buffer
 
     def _init_write_back_staging_buffers(self):
         self.staging_page_capacity = 0
@@ -668,6 +731,37 @@ class MLATokenToKVPoolHost(HiSparseHostPoolMixin, HostKVCache):
         if ret != 0:
             raise RuntimeError(f"offload.kv_exchange_copy failed with code {ret}")
 
+    def _transfer_one_layer(
+        self,
+        layer_id,
+        host_indices,
+        device_indices,
+        *,
+        is_draft,
+        direction,
+    ) -> None:
+        """Transfer one layer's split K/V between device and host (N=1).
+
+        Maps the global controller layer ID to a per-info native buffer and a
+        host row via ``_host_layer_by_controller``, then exchanges a single
+        5-D view in ``layer_first`` order. Indexer components are added in a
+        later step; here only K/V are moved.
+        """
+        info_index = layer_id - self._device_layer_num + 1 if is_draft else 0
+        native = self._native_infos[info_index].native_buffers()
+        device_layer_id = 0 if is_draft else layer_id
+        host_layer_id = self._host_layer_by_controller[layer_id]
+        transfer_kv_dim_exchange(
+            device_indices=device_indices,
+            host_indices=host_indices,
+            device_k=native.k[device_layer_id].unsqueeze(0),
+            host_k=self.k_buffer[host_layer_id].unsqueeze(1),
+            device_v=native.v[device_layer_id].unsqueeze(0),
+            host_v=self.v_buffer[host_layer_id].unsqueeze(1),
+            page_size=self.page_size,
+            direction=direction,
+        )
+
     def load_to_device_per_layer(
         self,
         device_pool,
@@ -760,6 +854,15 @@ class MLATokenToKVPoolHost(HiSparseHostPoolMixin, HostKVCache):
             else:
                 raise ValueError(f"Unsupported layout: {self.layout}")
         elif io_backend == "kernel_ascend":
+            if self.layout == "layer_first":
+                self._transfer_one_layer(
+                    layer_id,
+                    host_indices,
+                    device_indices,
+                    is_draft=is_draft,
+                    direction=TransferDirection.H2D,
+                )
+                return
             info_index = layer_id - self._device_layer_num + 1 if is_draft else 0
             native = self._native_infos[info_index].native_buffers()
             device_layer_id = 0 if is_draft else layer_id
@@ -815,9 +918,23 @@ class MLATokenToKVPoolHost(HiSparseHostPoolMixin, HostKVCache):
         is_draft: bool = False,
     ):
         assert not self._is_dummy, "backup on a dummy (non-src MLA) host pool"
-        if io_backend not in ("kernel", "direct"):
+        if io_backend not in ("kernel", "direct", "kernel_ascend"):
             raise ValueError(
                 f"Layer-sharded HiCache backup does not support IO backend: {io_backend}"
+            )
+        if io_backend == "kernel_ascend":
+            if self.layout == "layer_first":
+                self._transfer_one_layer(
+                    layer_id,
+                    host_indices,
+                    device_indices,
+                    is_draft=is_draft,
+                    direction=TransferDirection.D2H,
+                )
+                return
+            raise ValueError(
+                "Layer-sharded Ascend HiCache backup only supports "
+                f"layer_first layout, got {self.layout}"
             )
         # Indices arrive already translated by backup_from_device_all_layer.
         # Draft transfer IDs follow all target device layers, while host rows
@@ -992,6 +1109,24 @@ class MLATokenToKVPoolHost(HiSparseHostPoolMixin, HostKVCache):
             else:
                 raise ValueError(f"Unsupported layout: {self.layout}")
         elif io_backend == "kernel_ascend":
+            if self.layout == "layer_first":
+                for target_id in self._target_layer_indices:
+                    self._transfer_one_layer(
+                        target_id,
+                        host_indices,
+                        device_indices,
+                        is_draft=False,
+                        direction=TransferDirection.D2H,
+                    )
+                for draft_i in range(self._draft_layer_num):
+                    self._transfer_one_layer(
+                        self._device_layer_num + draft_i,
+                        host_indices,
+                        device_indices,
+                        is_draft=True,
+                        direction=TransferDirection.D2H,
+                    )
+                return
             native = self._native_infos[0].native_buffers()
             if self.layout == "page_first_kv_split":
                 if _is_npu and ascendc_io_enabled():
