@@ -313,7 +313,11 @@ FP8 DSA 各构造 `layout="layer_first"` 的 host pool + 已知内容的 device 
   ① `index_k`/`index_k_scale` 作为 AscendC 独立 component（`_build_ascendc_component_meta` 的第 3/4
   个 component）被正确搬运、device 层号→index slot 映射正确；② host scale 为 5-D
   `[num_indexer_layers, page_num, page_size, 1, 1]`；③ D2H/H2D 各跑一次，断言 component 数量
-  ≤ 4、无越界（对应设计文档 §6.7）。
+  ≤ 4、无越界（对应设计文档 §6.7）；④ **indexer 整块 + 绝对 slot 定位**：取一个
+  `ik_start > 0` 的命中层（非首个 index slot），断言该层 index_k/scale 搬运到**正确的** slot、
+  未发生「先切片再叠加绝对 slot」的双重偏移（即不以段内切片 + `index_k_layer_start=ik_start`
+  同时传）；⑤ **None 场景**：普通 MLA（`native.index_k is None`）与 BF16 有 index_k 无
+  `index_scales` 的 pool，断言 H2D/D2H 不生成对应 index/scale component、不因直接切片 None 报错。
 - FP8 DSA 专测：`v_width==0` 时 `v_buffer` 为 5-D 零元素空张量（非 `None`、不占容量），
   `_build_ascendc_component_meta` 的 V component 因 `numel()==0` 被跳过、只保留 K component，
   断言容量闭合 + D2H/H2D 无越界（对应设计文档 §6.6）。
@@ -421,7 +425,9 @@ DeepSeek-V2-Lite（无 SSM state）过测无法覆盖 `MambaPoolHost` 这条分�
   component（`_indexer_slot_range_for_layer` 做 device 层→slot 映射；host scale 取 5-D
   `[num_indexer_layers, page_num, page_size, 1, 1]`）。
 - 单测：`test/registered/unit/npu/mem_cache/test_hicache_layer_first_mla_indexer.py`（新建）
-  —— 带 index_k/scale 的子集层 pool，断言 index_k/scale 搬运正确、slot 映射正确、component 数量 ≤ 4。
+  —— 带 index_k/scale 的子集层 pool，断言 index_k/scale 搬运正确、slot 映射正确、component 数量 ≤ 4；
+  另覆盖 `ik_start > 0` 的绝对 slot 定位（不双重偏移）与 None 场景（无 index_k / 无 index_scales
+  时跳过、不生成 component）。
 
 **Step 8 — FP8 DSA 空 V component 跳过**
 - 改动：`mla.py` 在 `v_width==0` 时 `v_buffer` 用 5-D 零元素空张量（非 `None`、不占容量），

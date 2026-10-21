@@ -489,6 +489,15 @@ raise ValueError`，即 layer_first + kernel_ascend + 层分片组合仍被明�
 改为接收显式的 host 切片视图（与 §3 一致）。D2H 按 `_native_infos` 分段、`host_offset` 累加：
 
 ```python
+# indexer 接口约定（K/V 与 indexer 传参方式不同，务必区分）：
+# - K/V：device 与 host 都切到「段内 layer 0」起点（D2H 切整段、H2D 切单层），layer_start/layer_num
+#   是段内相对层号（D2H 传 0/n，H2D 传 0/1）；kernel 对 device/host 用同一 lo/hi，两端必须同起点。
+# - indexer：device（native.index_k / native.index_scales）与 host（self.index_k_buffer /
+#   self.index_k_scale_buffer）都以「index slot 序」组织、slot 号在两端天然对齐，故一律「整块传入
+#   + 绝对 slot」定位，绝不切片（切片后基址已变，再叠加绝对 slot 会二次偏移、读写错槽位）。
+#   indexer buffer 可能为 None（普通 MLA 无 index_k、BF16 无 index_scales / host scale buffer），
+#   None 时 _build_ascendc_component_meta 跳过、不生成该 component。
+
 # MLA D2H：target 用 _native_infos[0]，每个 draft 各一次 _native_infos[j]
 for info_index, info in enumerate(self._native_infos):
     native = info.native_buffers()                       # .k / .v / .index_k / .index_scales
@@ -496,30 +505,31 @@ for info_index, info in enumerate(self._native_infos):
     host_lo = 0 if info_index == 0 else self.target_layer_num + (info_index - 1)
     host_k = self.k_buffer[host_lo : host_lo + n]        # 段内 layer 0 对齐
     host_v = self.v_buffer[host_lo : host_lo + n]
-    _transfer_ascendc_sparse_copy(native, host_k, host_v, host_indices, device_indices,
-                                  direction=D2H, layer_start=0, layer_num=n)
-# indexer 仅在 target 的 native 上存在（index_layer_indices），其 host index_k/scale 视图随
-# target 段一起整体传入；per-layer 时用 _indexer_slot_range_for_layer(native, device_layer) 定 slot。
+    # indexer 仅存在于 target（native.index_k is not None）；index_k_layer_num=-1 表示搬全部 slot。
+    _transfer_ascendc_sparse_copy(
+        native.k, native.v, host_k, host_v, host_indices, device_indices,
+        direction=D2H, layer_start=0, layer_num=n,
+        dev_index_k=native.index_k, host_index_k=self.index_k_buffer,
+        dev_index_scale=native.index_scales, host_index_scale=self.index_k_scale_buffer,
+        index_k_layer_start=0, index_k_layer_num=-1,
+    )
 
 # MLA H2D：单层，复用 _transfer_one_layer 的反查（L763-766）已有逻辑
 native = self._native_infos[info_index].native_buffers()
 device_layer = 0 if is_draft else layer_id
 host_layer_id = self._host_layer_by_controller[layer_id]
-# indexer 单层传参：仅 index_layer_indices 命中的层才搬（复用 _indexer_slot_range_for_layer，
-# L466-472：命中返回 (slot,1)，非 index 层返回 (0,0)）；(0,0) 时 host index_k/scale 切片 numel()==0，
-# _build_ascendc_component_meta 据此跳过这两个 component，不会每次 H2D 都误搬全部 indexer 槽位。
+# slot 由 _indexer_slot_range_for_layer(native, device_layer)（L466-472）给出：命中返回 (slot,1)、
+# 非 index 层返回 (0,0)、无 indexer 返回 (0,-1)。indexer 整块传入（None 时跳过）、绝对 slot 定位。
 ik_start, ik_num = self._indexer_slot_range_for_layer(native, device_layer)
 _transfer_ascendc_sparse_copy(
     native.k[device_layer : device_layer + 1],
     native.v[device_layer : device_layer + 1],
-    native.index_k[ik_start : ik_start + ik_num],
-    native.index_scales[ik_start : ik_start + ik_num],
     self.k_buffer[host_layer_id : host_layer_id + 1],
     self.v_buffer[host_layer_id : host_layer_id + 1],
-    self.index_k_buffer[ik_start : ik_start + ik_num],
-    self.index_k_scale_buffer[ik_start : ik_start + ik_num],
     host_indices, device_indices,
     direction=H2D, layer_start=0, layer_num=1,
+    dev_index_k=native.index_k, host_index_k=self.index_k_buffer,
+    dev_index_scale=native.index_scales, host_index_scale=self.index_k_scale_buffer,
     index_k_layer_start=ik_start, index_k_layer_num=ik_num,
 )
 ```
@@ -618,8 +628,16 @@ packed = [ latent FP8 (kv_lora_rank × 1B) | rope BF16 (qk_rope_head_dim × 2B) 
   `shape[0]`/`shape[1]` 切换（§6.4(D)）。
 - **index 层区间**与 K component 的 `layer_start/layer_num` 相互独立：`_transfer_ascendc_sparse_copy`
   有独立 `index_k_layer_start` / `index_k_layer_num` 入参；per-layer H2D 时须按 device 层 → index
-  slot 映射（复用 `_indexer_slot_range_for_layer`，L541-547）传对区间，不能对 model 层盲目逐
+  slot 映射（复用 `_indexer_slot_range_for_layer`，L466-472）传对区间，不能对 model 层盲目逐
   indexer 层传。
+- **接口约定（与 §6.4 示例一致）**：indexer 的 device 张量（`native.index_k` / `native.index_scales`）
+  与 host 张量（`self.index_k_buffer` / `self.index_k_scale_buffer`）以「index slot 序」组织、
+  slot 号两端对齐，因此**一律整块传入 + 绝对 `index_k_layer_start` 定位，绝不切片**（切片后再叠加
+  绝对 slot 会二次偏移）。`_build_ascendc_component_meta` 内 `ik_lo = index_k_layer_start`、
+  `ik_hi = index_k_layer_start + index_k_layer_num`（`index_k_layer_num < 0` 时取整块 `shape[0]`），
+  并依 `native.index_k is None`、`native.index_scales is None`、`self.index_k_scale_buffer is None`
+  逐项跳过、不生成对应 component——普通 MLA（无 index_k）与 BF16（无 index_scales）由这套 None
+  判断兜底，调用侧无需也不应切片或判空。
 - `len(comps) > 4` 抛错（L694-697）：含 indexer 的完整 K/V/index_k/index_k_scale 恰好 4 个
   component，在 FP8 DSA（无 V）+ indexer 下为 3 个（K + index_k + scale）。
 
