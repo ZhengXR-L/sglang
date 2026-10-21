@@ -505,12 +505,23 @@ for info_index, info in enumerate(self._native_infos):
 native = self._native_infos[info_index].native_buffers()
 device_layer = 0 if is_draft else layer_id
 host_layer_id = self._host_layer_by_controller[layer_id]
-_transfer_ascendc_sparse_copy(native.k[device_layer : device_layer + 1],
-                              native.v[device_layer : device_layer + 1],
-                              self.k_buffer[host_layer_id : host_layer_id + 1],
-                              self.v_buffer[host_layer_id : host_layer_id + 1],
-                              host_indices, device_indices,
-                              direction=H2D, layer_start=0, layer_num=1)
+# indexer 单层传参：仅 index_layer_indices 命中的层才搬（复用 _indexer_slot_range_for_layer，
+# L466-472：命中返回 (slot,1)，非 index 层返回 (0,0)）；(0,0) 时 host index_k/scale 切片 numel()==0，
+# _build_ascendc_component_meta 据此跳过这两个 component，不会每次 H2D 都误搬全部 indexer 槽位。
+ik_start, ik_num = self._indexer_slot_range_for_layer(native, device_layer)
+_transfer_ascendc_sparse_copy(
+    native.k[device_layer : device_layer + 1],
+    native.v[device_layer : device_layer + 1],
+    native.index_k[ik_start : ik_start + ik_num],
+    native.index_scales[ik_start : ik_start + ik_num],
+    self.k_buffer[host_layer_id : host_layer_id + 1],
+    self.v_buffer[host_layer_id : host_layer_id + 1],
+    self.index_k_buffer[ik_start : ik_start + ik_num],
+    self.index_k_scale_buffer[ik_start : ik_start + ik_num],
+    host_indices, device_indices,
+    direction=H2D, layer_start=0, layer_num=1,
+    index_k_layer_start=ik_start, index_k_layer_num=ik_num,
+)
 ```
 
 关键点同 §3：`lo/hi` 用同一个 layer 计数器同时索引 device 与 host 两端，因此每段必须让 device

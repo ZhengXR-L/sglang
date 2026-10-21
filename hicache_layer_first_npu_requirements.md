@@ -383,8 +383,8 @@ DeepSeek-V2-Lite（无 SSM state）过测无法覆盖 `MambaPoolHost` 这条分�
   （`host_layer_stride = stride(0)*itemsize`、`host_page_stride = stride(1)*itemsize`）；
   `backup_from_device_all_layer` 的 layer_first 分支从 `_transfer_one_layer` 改为按 buffer_info
   分段调 `_transfer_ascendc_sparse_copy`（target 一次、每个 draft 一次，各自覆盖其全部层，
-  host 层号经 `target_layer_num + 本地层号` 映射；draft 不得与主 pool 共享同一 layer 索引空间，
-  否则触发 `_build_ascendc_component_meta` 的 `k_hi` 越界校验）。
+  host 层号经 `target_layer_num + 本地层号` 映射；draft 通过 device/host 分别切片、以段内层号
+  0 调用，验证写入对应 host 层且不触发越界）。
 - 单测：同 Step 2 文件 —— 含 draft 层的 pool，backup 后断言 `k_buffer[host_layer_id]` /
   `v_buffer[...]` 逐层正确、映射不错层；并对拍 page_first 结果一致。
 
