@@ -329,13 +329,10 @@ elif io_backend == "kernel_ascend":
         raise ValueError(...)
 ```
 
-> **层分片（`_layer_shard_enabled`）是独立前置分流，需一并修改**：`backup_from_device_all_layer`
-> 在进入 `kernel_ascend` 分支**之前**，L892-905 会先判断 `_layer_shard_enabled`，逐层调用
-> `_backup_from_device_per_layer` 后 `return`；而该方法 L818-821 目前
-> `if io_backend not in ("kernel", "direct"): raise ValueError`，**拒绝 `kernel_ascend`**。因此若
-> 不改这个前置分流，layer_first + kernel_ascend + 层分片会直接抛错、到不了上面新分支。
-> 方案：在 `_backup_from_device_per_layer` **新增 `kernel_ascend + layer_first` 分支**，同样复用
-> `_transfer_one_layer`（H2D 的 `load_to_device_per_layer` 已支持逐层 kernel_ascend，两侧保持对称）。
+> **层分片（`_layer_shard_enabled`）不在本次范围**：与 `page_first` 现状一致。`backup_from_device_all_layer`
+> 在进入 `kernel_ascend` 分支之前，仍会先判断 `_layer_shard_enabled` 并逐层调用
+> `_backup_from_device_per_layer`；该方法保留 `if io_backend not in ("kernel", "direct"): raise ValueError`，
+> 即 layer_first + kernel_ascend + 层分片组合仍会被明确拒绝（与 `page_first_kv_split` 行为一致，本次不实现）。
 
 **(B) H2D（`load_to_device_per_layer`）——只搬传入的 `layer_id`：**
 
@@ -357,7 +354,7 @@ def _transfer_one_layer(self, layer_id, host_indices, device_indices, *, is_draf
     info_index = layer_id - self._device_layer_num + 1 if is_draft else 0
     native = self._native_infos[info_index].native_buffers()      # target=0 / draft=[1..]
     device_layer_id = 0 if is_draft else layer_id
-    host_layer_id = self._host_layer_by_controller[layer_id]      # 层分片/draft → host 下标
+    host_layer_id = self._host_layer_by_controller[layer_id]      # draft → host 下标
     # K / V
     dev_k = native.k[device_layer_id].unsqueeze(0)                # [1, dev_pages, P, 1, k_width]
     host_k = self.k_buffer[host_layer_id].unsqueeze(1)            # [pages, 1, P, 1, k_width]
@@ -385,7 +382,7 @@ def _transfer_one_layer(self, layer_id, host_indices, device_indices, *, is_draf
 > （`kvcacheio.py` L94-122）拆成额外 `transfer_kv_dim_exchange` 调用，**device** scale 会自动从
 > 4-D pad 到 5-D（host scale 在上表已直接按 5-D 分配，无需补维）。
 
-**MLA 层号映射（target / draft / 层分片）**：
+**MLA 层号映射（target / draft）**：
 - device 层号 → host 层号用 `_host_layer_by_controller`（mla.py L167-175）反查；draft 层号在
   `_device_layer_num` 之后、映射到 `target_layer_num + i`。
 - native buffer 选 `_native_infos[info_index]`（target=0，draft 按 `layer_id` 回退），与现有
@@ -393,8 +390,6 @@ def _transfer_one_layer(self, layer_id, host_indices, device_indices, *, is_draf
 - D2H 不能对同一个 `native.k` 直接 `range(layer_num)` 跨 draft 索引：必须按 `_native_infos` 分块
   （target 用 `[0]`、draft 依次用 `[1..]`），与原 `_backup_from_device_per_layer`（mla.py L892-905）
   的 target/draft 划分一致。上面的 helper 通过 `info_index`/`device_layer_id` 已内建此映射。
-- 层分片（`_layer_shard_enabled`）见上方「层分片需要一并修改前置分流」；helper 只做单层转译，
-  不受分片方式影响。
 
 > 说明：`native.k[l]` 形状 `[dev_pages, P, 1, k_width]`，`unsqueeze(0)` 后 `dim0=1`；
 > `self.k_buffer[l]` 形状 `[page_num, P, 1, k_width]`，`unsqueeze(1)` 后 `dim1=1`；二者
@@ -685,7 +680,7 @@ def resolve_storage_layout_compatibility(server_args: Any):
    host_indices/device_indices 显式入参，D2H/H2D 共用，保证 V 始终为 5-D 张量、indexer 逐层搬运）。
 2. MHA layer_first（§5）+ 单元测试闭环。
 3. MLA layer_first（§6，普通 BF16，含 indexer）+ 单元测试闭环（含 §6.4.1 派生接口适配、
-   `_size_per_token` 的 indexer 计入、层分片 `_backup_from_device_per_layer` 的 kernel_ascend 分支）。
+   `_size_per_token` 的 indexer 计入）。
 4. FP8 DSA 特殊路径（§6.6）+ 单测覆盖打包宽度与空 V。
 5. 布局开关（§7）+ 端到端精度测试。
 6. 性能对比 + CI 注册（对应需求文档 §11）。

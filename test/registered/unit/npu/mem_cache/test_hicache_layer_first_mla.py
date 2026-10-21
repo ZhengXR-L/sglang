@@ -4,7 +4,6 @@ Coverage:
 - Step 3: ``init_kv_buffer`` split allocation + ``_size_per_token`` closure.
 - Step 4: ``backup_from_device_all_layer`` D2H (target + draft, one layer/call).
 - Step 5: ``load_to_device_per_layer`` H2D (single layer semantics).
-- Step 6: layer-sharded ``_backup_from_device_per_layer`` kernel_ascend branch.
 """
 
 import unittest
@@ -181,28 +180,6 @@ def _build_draft_host():
         target_layer_num=2,
     )
     return host, [(target_k, target_v), (draft_k, draft_v)]
-
-
-def _build_sharded_host():
-    """Build a layer-sharded host owning layer 0 of a 2-layer device pool."""
-    k, v, native = _make_split(2)
-    info = _make_info(k, v, native, layer_indices=(0,), device_layer_num=2)
-    host = MLATokenToKVPoolHost(
-        info,
-        2,
-        0,
-        PAGE_SIZE,
-        "layer_first",
-        pin_memory=False,
-        device="cpu",
-        draft_buffer_infos=(),
-        device_capacity_tokens=32,
-        start_layer=0,
-        end_layer=1,
-        target_layer_num=1,
-        layer_shard_enabled=True,
-    )
-    return host, k, v
 
 
 def _make_transfer(captured: list):
@@ -450,27 +427,6 @@ class TestNpuMlaLayerFirstTransfer(unittest.TestCase):
         self.assertTrue(torch.equal(target_v[0], torch.zeros_like(target_v[0])))
         self.assertTrue(torch.equal(draft_k[0], torch.zeros_like(draft_k[0])))
         self.assertTrue(torch.equal(draft_v[0], torch.zeros_like(draft_v[0])))
-
-    def test_layer_sharded_backup_uses_kernel_ascend_branch(self):
-        host, k, v = _build_sharded_host()
-        self.addCleanup(host.destroy)
-        _fill_layerwise(k, base=0)
-        _fill_layerwise(v, base=10)
-
-        device_indices = _indices(0, DEVICE_PAGES)
-        host_indices = _indices(0, DEVICE_PAGES)
-
-        captured = []
-        with _patch_ascend_transfer(captured):
-            host.backup_from_device_all_layer(
-                object(), host_indices, device_indices, "kernel_ascend"
-            )
-
-        # Only the owned layer 0 is backed up.
-        self.assertEqual(len(captured), 1)
-        self.assertEqual(captured[0]["direction"], "D2H")
-        self.assertTrue(torch.equal(host.k_buffer[0][:DEVICE_PAGES], k[0]))
-        self.assertTrue(torch.equal(host.v_buffer[0][:DEVICE_PAGES], v[0]))
 
 
 if __name__ == "__main__":

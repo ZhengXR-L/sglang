@@ -914,27 +914,11 @@ class MLATokenToKVPoolHost(HiSparseHostPoolMixin, HostKVCache):
         device_indices,
         layer_id,
         io_backend,
-        *,
-        is_draft: bool = False,
     ):
         assert not self._is_dummy, "backup on a dummy (non-src MLA) host pool"
-        if io_backend not in ("kernel", "direct", "kernel_ascend"):
+        if io_backend not in ("kernel", "direct"):
             raise ValueError(
                 f"Layer-sharded HiCache backup does not support IO backend: {io_backend}"
-            )
-        if io_backend == "kernel_ascend":
-            if self.layout == "layer_first":
-                self._transfer_one_layer(
-                    layer_id,
-                    host_indices,
-                    device_indices,
-                    is_draft=is_draft,
-                    direction=TransferDirection.D2H,
-                )
-                return
-            raise ValueError(
-                "Layer-sharded Ascend HiCache backup only supports "
-                f"layer_first layout, got {self.layout}"
             )
         # Indices arrive already translated by backup_from_device_all_layer.
         # Draft transfer IDs follow all target device layers, while host rows
@@ -1017,7 +1001,6 @@ class MLATokenToKVPoolHost(HiSparseHostPoolMixin, HostKVCache):
                     device_indices,
                     self._device_layer_num + draft_layer_id,
                     io_backend,
-                    is_draft=True,
                 )
             return
 

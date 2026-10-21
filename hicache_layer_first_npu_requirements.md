@@ -235,7 +235,6 @@ layer_first 属 page_unified 系，不在本期 MHA/MLA 必改范围，见 §6 �
 | `python/sglang/srt/mem_cache/pool_host/mha.py` | `load_to_device_per_layer` | L495 起 `kernel_ascend` 仅 `page_first_direct` |
 | `python/sglang/srt/mem_cache/pool_host/mla.py` | `backup_from_device_all_layer` | L996 起仅 `page_first_kv_split` |
 | `python/sglang/srt/mem_cache/pool_host/mla.py` | `load_to_device_per_layer` | L762 起仅 `page_first_kv_split` |
-| `python/sglang/srt/mem_cache/pool_host/mla.py` | `_backup_from_device_per_layer`（层分片前置分流） | 当前 `if io_backend not in ("kernel","direct")` 拒绝 `kernel_ascend`，需新增 `kernel_ascend + layer_first` 分支 |
 
 > **并非「只补传输分支」**：
 > - MHA：`init_kv_buffer` 已是 K/V 分离（`dims=(2, layer_num, size, head_num, head_dim)`），
@@ -263,9 +262,9 @@ layer_first 属 page_unified 系，不在本期 MHA/MLA 必改范围，见 §6 �
 
 ### 10.5 建议落地顺序
 
-1. 抽象公共 helper：layer_first → 5-D 视图 + 单层搬运转译 `_transfer_one_layer`（内置层号映射 / index slot 映射 / 层分片前置分流）；
+1. 抽象公共 helper：layer_first → 5-D 视图 + 单层搬运转译 `_transfer_one_layer`（内置层号映射 / index slot 映射）；
 2. MHA layer_first + 单测闭环；
-3. MLA layer_first（普通 BF16，含 indexer 逐层、层分片分支、`_size_per_token` 计入 indexer）+ 单测；
+3. MLA layer_first（普通 BF16，含 indexer 逐层、`_size_per_token` 计入 indexer）+ 单测；
 4. FP8 DSA 特殊路径（空 V 只传 K）+ wrapper 空 V 占位改 5-D（10.4）；
 5. 开关（10.1）+ 端到端精度（含 Kimi-K3 SSM state 恢复回归）；
 6. 性能对比（长/短序列）+ CI 注册。
@@ -281,8 +280,7 @@ FP8 DSA 各构造 `layout="layer_first"` 的 host pool + 已知内容的 device 
 - 断言（通用）：
   1. `backup_from_device_all_layer`（D2H，**内部遍历所有层**）后，host 的 `kv_buffer[l]` 逐层 == 预期值；
   2. `load_to_device_per_layer`（H2D，**只搬传入的 `layer_id`，不循环所有层**）后，device buffer 正确复原；
-  3. **layer_first 与 page_first 写回/加载结果完全一致**（等价性对拍）；
-  4. 覆盖层分片路径：`_backup_from_device_per_layer` 的 `kernel_ascend` 分支能进入，不被「仅 kernel/direct」拒在门外。
+  3. **layer_first 与 page_first 写回/加载结果完全一致**（等价性对拍）。
 - MLA indexer 专测：构造带 `index_k`（及 `index_k_scale`）的子集层，逐层（N=1）传输，验证
   ① `_indexer_slot_range_for_layer` 的 device 层号→index slot 映射正确；② host scale 为 5-D
   `[num_indexer_layers, page_num, page_size, 1, 1]`；③ **「indexer 实际调用」**——wrapper 内
@@ -364,12 +362,6 @@ DeepSeek-V2-Lite（无 SSM state）过测无法覆盖 `MambaPoolHost` 这条分�
 **Step 5 — MLA H2D（load）分支（单层）**
 - 改动：`mla.py::load_to_device_per_layer` 单层搬移（含 target/draft 映射）。
 - 单测：同 Step 3 文件 —— backup+load 复原；单层语义（同 Step 2 断言）。
-
-**Step 6 — MLA 层分片前置分流**
-- 改动：`mla.py::_backup_from_device_per_layer` 新增 `kernel_ascend + layer_first` 分支
-  （当前被 `not in ("kernel","direct")` 拒之门外）。
-- 单测：同 Step 3 文件 —— 层分片场景（host 单层分片 < device 层数），断言不抛错、数据正确，
-  可加探针断言命中新分支。
 
 ### 阶段 C：MLA 特殊路径（indexer / FP8 DSA / wrapper）
 
