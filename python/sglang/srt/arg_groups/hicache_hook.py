@@ -180,6 +180,16 @@ def resolve_layout_io_compatibility(server_args: Any):
 def resolve_storage_layout_compatibility(server_args: Any):
     cfg = resolving_view(server_args)
     if (
+        cfg.hicache_mem_layout == "layer_first"
+        and cfg.hicache_storage_backend is not None
+        and cfg.hicache_io_backend == "kernel_ascend"
+    ):
+        raise ValueError(
+            "layer_first layout does not support any HiCache storage backend "
+            "on NPU in this release (got --hicache-storage-backend "
+            f"{cfg.hicache_storage_backend!r}); use a page_first layout for L3."
+        )
+    if (
         cfg.hicache_storage_backend not in ("mooncake", "npu_memcache")
         or cfg.hicache_mem_layout != "layer_first"
     ):

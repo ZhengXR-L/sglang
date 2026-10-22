@@ -180,18 +180,23 @@ def set_default_server_args(args: "ServerArgs"):
             "set_default_server_args",
             hicache_io_backend="kernel_ascend",
         )
-        if use_mla_backend(args):
-            declare_resolution(
-                args,
-                "set_default_server_args",
-                hicache_mem_layout="page_first_kv_split",
-            )
-        else:
-            declare_resolution(
-                args,
-                "set_default_server_args",
-                hicache_mem_layout="page_first_direct",
-            )
+        # Respect an explicit --hicache-mem-layout layer_first on NPU: only
+        # project the page_first default when the user did not request the
+        # layer_first layout. Memfabric enforcement for layer_first happens at
+        # host pool allocation time (design §6.8), where the pool class is known.
+        if cfg.hicache_mem_layout != "layer_first":
+            if use_mla_backend(args):
+                declare_resolution(
+                    args,
+                    "set_default_server_args",
+                    hicache_mem_layout="page_first_kv_split",
+                )
+            else:
+                declare_resolution(
+                    args,
+                    "set_default_server_args",
+                    hicache_mem_layout="page_first_direct",
+                )
 
 
 @_call_once
