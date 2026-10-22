@@ -651,6 +651,8 @@ class MLATokenToKVPoolHost(HiSparseHostPoolMixin, HostKVCache):
             if isinstance(direction, TransferDirection)
             else int(direction)
         )
+        direction_name = getattr(direction, "name", str(direction))
+        layer_end = buffers.k.shape[0] if layer_num < 0 else layer_start + layer_num
 
         vals = [
             len(comps),
@@ -665,6 +667,15 @@ class MLATokenToKVPoolHost(HiSparseHostPoolMixin, HostKVCache):
         for comp in comps:
             vals.extend(comp)
 
+        logger.info(
+            "HiCache AscendC kv_exchange_copy %s: layout=%s pages=%d layers=[%d,%d) components=%d",
+            direction_name,
+            self.layout,
+            num_pages,
+            layer_start,
+            layer_end,
+            len(comps),
+        )
         self._launch_ascendc_kv_exchange(vals, device)
 
     @staticmethod
