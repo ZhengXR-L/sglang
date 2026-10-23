@@ -54,6 +54,8 @@ python -m sglang.launch_server \
     --hicache-ratio 0.5 \
     --mem-fraction-static 0.6 \
     --max-total-tokens "$MAX_TOTAL_TOKENS" \
+    --device npu \
+    --attention-backend ascend \
     --log-level info \
     > "$SERVER_LOG" 2>&1 &
 

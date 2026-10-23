@@ -180,7 +180,7 @@ def resolve_layout_io_compatibility(server_args: Any):
 def resolve_storage_layout_compatibility(server_args: Any):
     cfg = resolving_view(server_args)
     if (
-        cfg.hicache_mem_layout == "layer_first"
+        cfg.hicache_mem_layout in ("layer_first", "layer_first_kv_split")
         and cfg.hicache_storage_backend is not None
         and cfg.hicache_io_backend == "kernel_ascend"
     ):

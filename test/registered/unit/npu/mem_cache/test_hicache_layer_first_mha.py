@@ -147,7 +147,7 @@ def _build_draft_host():
             HOST_TO_DEVICE_RATIO,
             0,
             PAGE_SIZE,
-            "layer_first",
+            "layer_first_kv_split",
             pin_memory=False,
             device="cpu",
             draft_buffer_infos=(draft_info,),

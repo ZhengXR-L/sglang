@@ -125,7 +125,7 @@ def _build_host(
             2,
             0,
             PAGE_SIZE,
-            "layer_first",
+            "layer_first_kv_split",
             pin_memory=False,
             device="cpu",
             draft_buffer_infos=(),

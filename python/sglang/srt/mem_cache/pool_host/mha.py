@@ -288,7 +288,7 @@ class MHATokenToKVPoolHost(HostKVCache):
         return self.get_size_per_token() // 2
 
     def init_kv_buffer(self):
-        if self.layout == "layer_first":
+        if self.layout in ("layer_first", "layer_first_kv_split"):
             dims = (2, self.layer_num, self.size, self.head_num, self.head_dim)
         elif self.layout == "page_first":
             dims = (2, self.size, self.layer_num, self.head_num, self.head_dim)
@@ -326,16 +326,17 @@ class MHATokenToKVPoolHost(HostKVCache):
         self.layout_dim = self.token_stride_size * self.layer_num
 
         alloc_func = ALLOC_MEMORY_FUNCS[self._transfer_device.type]
-        if self.layout == "layer_first" and _is_npu:
-            # layer_first on NPU goes through the Memfabric AscendC zero-copy
-            # path, whose AIV kernel de-references host pointers via get_dva.
-            # The host pool must therefore be Memfabric-mapped, not ordinary
-            # pinned memory; reject the mismatch at allocation time rather than
-            # failing later inside get_dva. alloc_with_memfabric does not accept
-            # registration_granularity_bytes, so it is invoked separately.
+        if self.layout == "layer_first_kv_split":
+            # layer_first_kv_split on NPU goes through the Memfabric AscendC
+            # zero-copy path, whose AIV kernel de-references host pointers via
+            # get_dva. The host pool must therefore be Memfabric-mapped, not
+            # ordinary pinned memory; reject the mismatch at allocation time
+            # rather than failing later inside get_dva. alloc_with_memfabric does
+            # not accept registration_granularity_bytes, so it is invoked
+            # separately.
             if not memfabric_host_memory_enabled():
                 raise ValueError(
-                    "layer_first layout requires "
+                    "layer_first_kv_split layout requires "
                     "SGLANG_HICACHE_HOST_MEM_BACKEND=memfabric on NPU "
                     "(generic MHA/MLA host pool AscendC path)"
                 )
@@ -549,7 +550,7 @@ class MHATokenToKVPoolHost(HostKVCache):
                             page_size=self.page_size,
                             direction=TransferDirection.H2D,
                         )
-            elif self.layout == "layer_first":
+            elif self.layout == "layer_first_kv_split":
                 # Per-layer H2D: locate the layer within its buffer_info segment
                 # and slice device/host to a single layer aligned to
                 # segment-local layer 0.
@@ -621,7 +622,7 @@ class MHATokenToKVPoolHost(HostKVCache):
         host_indices.record_stream(stream)
         device_indices.record_stream(stream)
 
-        # MHA's AscendC path is only used for layer_first.
+        # MHA's AscendC path is only used for layer_first_kv_split.
         host_layout_mode = 1
         comps = self._build_ascendc_component_meta(
             device_k,
@@ -898,7 +899,7 @@ class MHATokenToKVPoolHost(HostKVCache):
                         page_size=self.page_size,
                         direction=TransferDirection.D2H,
                     )
-            elif self.layout == "layer_first":
+            elif self.layout == "layer_first_kv_split":
                 # D2H by buffer_info segment: device and host bases per segment
                 # align to segment-local layer 0.
                 layer_start = 0

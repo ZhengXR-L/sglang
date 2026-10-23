@@ -200,7 +200,7 @@ def _build_draft_host():
             2,
             0,
             PAGE_SIZE,
-            "layer_first",
+            "layer_first_kv_split",
             pin_memory=False,
             device="cpu",
             draft_buffer_infos=(draft_info,),
@@ -279,7 +279,7 @@ def _patch_ascend_transfer(captured: list, host):
 
 class TestNpuMlaLayerFirstAllocation(unittest.TestCase):
     def test_layer_first_split_allocates_separate_kv(self):
-        host = _build_host("layer_first", _make_mla_info(indexer=False))
+        host = _build_host("layer_first_kv_split", _make_mla_info(indexer=False))
         self.addCleanup(host.destroy)
 
         page_num = host.page_num
@@ -299,7 +299,7 @@ class TestNpuMlaLayerFirstAllocation(unittest.TestCase):
         )
 
     def test_layer_first_capacity_matches_page_first(self):
-        lf = _build_host("layer_first", _make_mla_info(indexer=False))
+        lf = _build_host("layer_first_kv_split", _make_mla_info(indexer=False))
         pf = _build_host("page_first_kv_split", _make_mla_info(indexer=False))
         self.addCleanup(lf.destroy)
         self.addCleanup(pf.destroy)
@@ -311,7 +311,7 @@ class TestNpuMlaLayerFirstAllocation(unittest.TestCase):
         self.assertEqual(lf.v_buffer.numel(), pf.v_buffer.numel())
 
     def test_layer_first_indexer_buffers_and_capacity(self):
-        host = _build_host("layer_first", _make_mla_info(indexer=True))
+        host = _build_host("layer_first_kv_split", _make_mla_info(indexer=True))
         self.addCleanup(host.destroy)
 
         page_num = host.page_num
@@ -348,7 +348,7 @@ class TestNpuMlaLayerFirstComponentMeta(unittest.TestCase):
         self.assertEqual(comp[6], PAGE_SIZE * KV_LORA_RANK * itemsize)
 
     def test_build_component_meta_layer_first_kv(self):
-        host = _build_host("layer_first", _make_mla_info(indexer=False))
+        host = _build_host("layer_first_kv_split", _make_mla_info(indexer=False))
         self.addCleanup(host.destroy)
         native = host._native_buffers
         n = native.k.shape[0]

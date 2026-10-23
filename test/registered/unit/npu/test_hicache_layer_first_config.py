@@ -79,7 +79,7 @@ def _build_layer_first_mla_host():
         2,
         0,
         page_size,
-        "layer_first",
+        "layer_first_kv_split",
         pin_memory=False,
         device="cpu",
         draft_buffer_infos=(),
@@ -134,7 +134,7 @@ def _build_layer_first_mha_host():
         ratio,
         0,
         page_size,
-        "layer_first",
+        "layer_first_kv_split",
         pin_memory=False,
         device="cpu",
         draft_buffer_infos=(),
@@ -212,7 +212,9 @@ class TestLayerFirstLayoutProjection(unittest.TestCase):
             mock.patch.object(npu_utils, "use_mla_backend", return_value=False),
         ):
             npu_utils.set_default_server_args(args)
-        self.assertEqual(resolution_result(args, "hicache_mem_layout"), "layer_first")
+        self.assertEqual(
+            resolution_result(args, "hicache_mem_layout"), "layer_first_kv_split"
+        )
 
     def test_page_first_default_still_projected(self):
         args = ServerArgs(

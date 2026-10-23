@@ -181,7 +181,7 @@ class MLATokenToKVPoolHost(HiSparseHostPoolMixin, HostKVCache):
                 self._native_infos = infos
                 native = self._native_buffers
                 index_layers = len(native.index_layer_indices)
-                if layout in ("page_first_kv_split", "layer_first") and native.index_k is not None:
+                if layout in ("page_first_kv_split", "layer_first_kv_split") and native.index_k is not None:
                     self._size_per_token += (
                         native.index_width * self.dtype.itemsize * index_layers
                     )
@@ -252,8 +252,8 @@ class MLATokenToKVPoolHost(HiSparseHostPoolMixin, HostKVCache):
             # kv_buffer is the k_buffer with the same page-major dims.
             transposed = self.kv_buffer.transpose(0, 1)
             self.data_refs = [transposed[i] for i in range(self.layer_num)]
-        elif self.layout == "layer_first" and self._native_buffers is not None:
-            # layer_first split allocation: k_buffer is layer-first
+        elif self.layout == "layer_first_kv_split":
+            # layer_first_kv_split allocation: k_buffer is layer-first
             # [layer, page, page_size, 1, k_width]; data_refs points at
             # per-layer k_buffer views (v/index held separately).
             self.data_refs = [self.k_buffer[i] for i in range(self.layer_num)]
@@ -280,7 +280,7 @@ class MLATokenToKVPoolHost(HiSparseHostPoolMixin, HostKVCache):
             # token_stride_size (K/V strides differ), so derive the per-page
             # item length from each component's own row width.
             data_ptrs, data_lens, item_lens = [], [], []
-            layer_axis = 0 if self.layout == "layer_first" else 1
+            layer_axis = 0 if self.layout == "layer_first_kv_split" else 1
             for buffer in (
                 self.k_buffer,
                 self.v_buffer,
@@ -308,13 +308,28 @@ class MLATokenToKVPoolHost(HiSparseHostPoolMixin, HostKVCache):
 
     def init_kv_buffer(self):
         if self.layout == "layer_first":
-            if self._native_buffers is not None:
-                return self._init_layer_first_kv_split_buffer()
+            # CUDA layer_first: packed (non-split) layer-major buffer.
             dims = (
                 self.layer_num,
                 self.size,
                 1,
                 self.kv_cache_dim,
+            )
+        elif self.layout == "layer_first_kv_split":
+            # NPU AscendC path: allocate layer-first split K/V via the shared
+            # helper. FP8 DSA packs V into K, so v_width is 0 and v_buffer
+            # becomes a 5-D zero-element empty tensor.
+            native = self._native_buffers
+            k_width = (
+                native.k_width if self.dsa_kv_cache_store_fp8 else self.kv_lora_rank
+            )
+            v_width = 0 if self.dsa_kv_cache_store_fp8 else native.v_width
+            return self._init_kv_split_buffer(
+                (self.layer_num, self.page_num, self.page_size, 1),
+                (len(native.index_layer_indices), self.page_num, self.page_size, 1),
+                k_width,
+                v_width,
+                require_memfabric=True,
             )
         elif self.layout == "page_first":
             dims = (
@@ -349,87 +364,20 @@ class MLATokenToKVPoolHost(HiSparseHostPoolMixin, HostKVCache):
         # Ascend-specific: Aligns with NPUMLATokenToKVPool layout
         # Separately allocate k_buffer and v_buffer for easier data transfer.
         elif self.layout == "page_first_kv_split":
-            base_dims = (self.page_num, self.layer_num, self.page_size, 1)
             # Indexer buffers only exist for physical Indexer layers, which can
             # be a subset of all layers (e.g. GLM 5.2: 21 of 78).  The device
-            # pool packs them as (num_indexer_layers, page, ...); mirror that
+            # pool packs them as (page, num_indexer_layers, ...); mirror that
             # layer count here so transfer_kv_dim_exchange's layer check
             # (device dim0 == host dim1) holds.
             native = self._native_buffers
-            num_indexer_layers = len(native.index_layer_indices)
-            indexer_dims = (self.page_num, num_indexer_layers, self.page_size, 1)
-            alloc_func = ALLOC_MEMORY_FUNCS[self._transfer_device.type]
-            if self.dsa_kv_cache_store_fp8:
-                # FP8 DSA packs latent+RoPE+scale into the device k_buffer;
-                # mirror the packed width so the 2D memcpy row width matches.
-                k_width = native.k_width
-            else:
-                k_width = self.kv_lora_rank
-            if _is_npu and memfabric_host_memory_enabled():
-                # Memfabric-mapped host DRAM (single switch): required by the
-                # AIV sparse-copy IO path and usable by the legacy memcpy2d
-                # path unchanged.  Size the GB-aligned reserve with the
-                # combined bytes of all buffers allocated below.
-                total_bytes = (
-                    self.page_num
-                    * self.page_size
-                    * self.layer_num
-                    * (k_width + self.qk_rope_head_dim)
-                    * self.dtype.itemsize
-                )
-                if native.index_k is not None:
-                    total_bytes += (
-                        self.page_num
-                        * self.page_size
-                        * num_indexer_layers
-                        * native.index_width
-                        * self.dtype.itemsize
-                    )
-                if native.index_scales is not None:
-                    # FP32 scale mirror
-                    total_bytes += (
-                        self.page_num * self.page_size * num_indexer_layers * 4
-                    )
-                ensure_memfabric_capacity(total_bytes, torch.npu.current_device())
-                alloc_func = alloc_with_memfabric
-            self.k_buffer = alloc_func(
-                (*base_dims, k_width),
-                dtype=self.dtype,
-                device=self.device,
-                pin_memory=self.pin_memory,
-                allocator=self.allocator,
+            k_width = native.k_width if self.dsa_kv_cache_store_fp8 else self.kv_lora_rank
+            return self._init_kv_split_buffer(
+                (self.page_num, self.layer_num, self.page_size, 1),
+                (self.page_num, len(native.index_layer_indices), self.page_size, 1),
+                k_width,
+                self.qk_rope_head_dim,
+                require_memfabric=False,
             )
-            self.v_buffer = alloc_func(
-                (*base_dims, self.qk_rope_head_dim),
-                dtype=self.dtype,
-                device=self.device,
-                pin_memory=self.pin_memory,
-                allocator=self.allocator,
-            )
-            self.index_k_buffer = None
-            if native.index_k is not None:
-                self.index_k_buffer = alloc_func(
-                    (*indexer_dims, native.index_width),
-                    dtype=self.dtype,
-                    device=self.device,
-                    pin_memory=self.pin_memory,
-                    allocator=self.allocator,
-                )
-            # Host-side mirror of the NPU quantized-Indexer FP32 scale cache
-            # (see NPUMLATokenToKVPool.index_k_scale_buffer). Only present when
-            # the device pool carries one (FP8 DSA + npu_quant_lightning_indexer).
-            self.index_k_scale_buffer = None
-            if native.index_scales is not None:
-                self.index_k_scale_buffer = alloc_func(
-                    (*indexer_dims, 1),
-                    dtype=torch.float32,
-                    device=self.device,
-                    pin_memory=self.pin_memory,
-                    allocator=self.allocator,
-                )
-            # Return k_buffer to preserve original kv_buffer and data_refs init logic,
-            # though Ascend doesn't use these parameters.
-            return self.k_buffer
         else:
             raise ValueError(f"Unsupported layout: {self.layout}")
         self.token_stride_size = self.kv_cache_dim * self.dtype.itemsize
@@ -450,64 +398,58 @@ class MLATokenToKVPoolHost(HiSparseHostPoolMixin, HostKVCache):
         )
         return buffer
 
-    def _init_layer_first_kv_split_buffer(self):
-        """Allocate layer-first split K/V (+ indexer) host buffers for NPU AscendC.
+    def _init_kv_split_buffer(
+        self, base_dims, indexer_dims, k_width, v_width, require_memfabric
+    ):
+        """Allocate split K/V (+ indexer) host buffers for NPU.
 
-        The AscendC ``kv_exchange_copy`` kernel moves one fixed-width component
-        per metadata entry, so the merged ``[layer, size, 1, kv_cache_dim]``
-        record cannot be expressed as clean K/V components (see design §6.3).
-        Split allocation mirrors ``page_first_kv_split`` but in layer-first
-        order: ``[layer_num, page_num, page_size, 1, width]``. FP8 DSA packs V
-        into K, so ``v_buffer`` becomes a 5-D zero-element empty tensor.
+        ``base_dims``/``indexer_dims`` carry the axis order, so both
+        ``page_first_kv_split`` (page-major) and ``layer_first_kv_split``
+        (layer-major) share this allocation tail. ``v_width == 0`` yields a 5-D
+        zero-element empty tensor because FP8 DSA packs V into K.
         """
         native = self._native_buffers
         num_indexer_layers = len(native.index_layer_indices)
-        base_dims = (self.layer_num, self.page_num, self.page_size, 1)
-        indexer_dims = (num_indexer_layers, self.page_num, self.page_size, 1)
         alloc_func = ALLOC_MEMORY_FUNCS[self._transfer_device.type]
-        if self.dsa_kv_cache_store_fp8:
-            # FP8 DSA packs latent+RoPE+scale into the device k_buffer; mirror
-            # the packed width so the row width matches the component.
-            k_width = native.k_width
-        else:
-            k_width = self.kv_lora_rank
+
         if _is_npu:
-            # layer_first on NPU goes through the Memfabric AscendC zero-copy
-            # path, whose AIV kernel de-references host pointers via get_dva.
-            # Reject a non-memfabric host pool here rather than failing later
-            # inside get_dva. This helper runs only for layer_first, so the
-            # check is scoped to the generic MLA pool (MambaPoolHost and the
-            # DSv4 dedicated pool are separate classes and do not reach here).
-            if not memfabric_host_memory_enabled():
+            if require_memfabric and not memfabric_host_memory_enabled():
+                # layer_first_kv_split on NPU goes through the Memfabric AscendC
+                # zero-copy path, whose AIV kernel de-references host pointers via
+                # get_dva. Reject a non-memfabric host pool here rather than
+                # failing later inside get_dva.
                 raise ValueError(
-                    "layer_first layout requires "
+                    "layer_first_kv_split layout requires "
                     "SGLANG_HICACHE_HOST_MEM_BACKEND=memfabric on NPU "
                     "(generic MHA/MLA host pool AscendC path)"
                 )
-            # Memfabric-mapped host DRAM required by the AIV sparse-copy IO
-            # path. Size the reserve with the combined bytes below.
-            total_bytes = (
-                self.page_num
-                * self.page_size
-                * self.layer_num
-                * (k_width + (0 if self.dsa_kv_cache_store_fp8 else native.v_width))
-                * self.dtype.itemsize
-            )
-            if native.index_k is not None:
-                total_bytes += (
+            if memfabric_host_memory_enabled():
+                # Memfabric-mapped host DRAM: required by the AIV sparse-copy IO
+                # path and usable by the legacy memcpy2d path unchanged.  Size
+                # the reserve with the combined bytes below.
+                total_bytes = (
                     self.page_num
                     * self.page_size
-                    * num_indexer_layers
-                    * native.index_width
+                    * self.layer_num
+                    * (k_width + v_width)
                     * self.dtype.itemsize
                 )
-            if native.index_scales is not None:
-                # FP32 scale mirror
-                total_bytes += (
-                    self.page_num * self.page_size * num_indexer_layers * 4
-                )
-            ensure_memfabric_capacity(total_bytes, torch.npu.current_device())
-            alloc_func = alloc_with_memfabric
+                if native.index_k is not None:
+                    total_bytes += (
+                        self.page_num
+                        * self.page_size
+                        * num_indexer_layers
+                        * native.index_width
+                        * self.dtype.itemsize
+                    )
+                if native.index_scales is not None:
+                    # FP32 scale mirror
+                    total_bytes += (
+                        self.page_num * self.page_size * num_indexer_layers * 4
+                    )
+                ensure_memfabric_capacity(total_bytes, torch.npu.current_device())
+                alloc_func = alloc_with_memfabric
+
         self.k_buffer = alloc_func(
             (*base_dims, k_width),
             dtype=self.dtype,
@@ -515,7 +457,7 @@ class MLATokenToKVPoolHost(HiSparseHostPoolMixin, HostKVCache):
             pin_memory=self.pin_memory,
             allocator=self.allocator,
         )
-        if native.v_width == 0:
+        if v_width == 0:
             # FP8 DSA: V is packed into K, so the host v mirror holds no valid
             # data. Keep a 5-D zero-element tensor (not None) so component
             # builders can safely check ``numel() > 0`` without extra guards.
@@ -524,7 +466,7 @@ class MLATokenToKVPoolHost(HiSparseHostPoolMixin, HostKVCache):
             )
         else:
             self.v_buffer = alloc_func(
-                (*base_dims, native.v_width),
+                (*base_dims, v_width),
                 dtype=self.dtype,
                 device=self.device,
                 pin_memory=self.pin_memory,
@@ -635,14 +577,15 @@ class MLATokenToKVPoolHost(HiSparseHostPoolMixin, HostKVCache):
         host_indices.record_stream(stream)
         device_indices.record_stream(stream)
 
-        host_layout_mode = 1 if self.layout == "layer_first" else 0
-        comps = self._build_ascendc_component_meta(
+        host_layout_mode = 1 if self.layout == "layer_first_kv_split" else 0
+        comps, comp_names = self._build_ascendc_component_meta(
             buffers,
             layer_start,
             layer_num,
             index_k_layer_start,
             index_k_layer_num,
             host_layout_mode,
+            return_names=True,
         )
 
         num_pages = host_indices.numel() // self.page_size
@@ -668,13 +611,14 @@ class MLATokenToKVPoolHost(HiSparseHostPoolMixin, HostKVCache):
             vals.extend(comp)
 
         logger.info(
-            "HiCache AscendC kv_exchange_copy %s: layout=%s pages=%d layers=[%d,%d) components=%d",
+            "HiCache AscendC kv_exchange_copy %s: layout=%s pages=%d layers=[%d,%d) components=%d (%s)",
             direction_name,
             self.layout,
             num_pages,
             layer_start,
             layer_end,
             len(comps),
+            ",".join(comp_names),
         )
         self._launch_ascendc_kv_exchange(vals, device)
 
@@ -714,8 +658,14 @@ class MLATokenToKVPoolHost(HiSparseHostPoolMixin, HostKVCache):
         index_k_layer_start: int,
         index_k_layer_num: int,
         host_layout_mode: int,
-    ) -> list:
-        """Assemble the per-component metadata list for kv_exchange_copy."""
+        return_names: bool = False,
+    ) -> "list | tuple":
+        """Assemble the per-component metadata list for kv_exchange_copy.
+
+        Returns the per-component metadata list.  When ``return_names`` is set,
+        returns ``(comps, comp_names)`` so callers can log which components
+        (k/v/index_k/index_scale) were assembled.
+        """
         k_lo = layer_start
         k_hi = buffers.k.shape[0] if layer_num < 0 else layer_start + layer_num
         # Both pools share the layer index space (same limitation as the legacy
@@ -735,12 +685,14 @@ class MLATokenToKVPoolHost(HiSparseHostPoolMixin, HostKVCache):
         comps = [
             comp_meta(buffers.k, self.k_buffer, k_lo, k_hi, host_layout_mode),
         ]
+        comp_names = ["k"]
         # FP8 DSA packs V into the device k_buffer; the device v_buffer is
         # empty and must be skipped.
         if buffers.v.numel() > 0 and self.v_buffer.numel() > 0:
             comps.append(
                 comp_meta(buffers.v, self.v_buffer, k_lo, k_hi, host_layout_mode)
             )
+            comp_names.append("v")
 
         device_index_k = buffers.index_k
         if self.index_k_buffer is not None and device_index_k is not None:
@@ -764,6 +716,7 @@ class MLATokenToKVPoolHost(HiSparseHostPoolMixin, HostKVCache):
                         host_layout_mode,
                     )
                 )
+                comp_names.append("index_k")
                 device_scale = buffers.index_scales
                 if self.index_k_scale_buffer is not None and device_scale is not None:
                     comps.append(
@@ -775,11 +728,12 @@ class MLATokenToKVPoolHost(HiSparseHostPoolMixin, HostKVCache):
                             host_layout_mode,
                         )
                     )
+                    comp_names.append("index_scale")
         if len(comps) > 4:
             raise RuntimeError(
                 f"AscendC kv_exchange supports at most 4 components, got {len(comps)}"
             )
-        return comps
+        return (comps, comp_names) if return_names else comps
 
     @staticmethod
     def _rewrite_host_base_to_dva(vals: list) -> list:
@@ -959,7 +913,7 @@ class MLATokenToKVPoolHost(HiSparseHostPoolMixin, HostKVCache):
                     page_size=self.page_size,
                     direction=TransferDirection.H2D,
                 )
-            elif self.layout == "layer_first":
+            elif self.layout == "layer_first_kv_split":
                 # Per-layer H2D: mirror page_first_kv_split and drive a single
                 # layer via layer_start/layer_num (no draft offset handled).
                 ik_start, ik_num = self._indexer_slot_range_for_layer(
@@ -1196,7 +1150,7 @@ class MLATokenToKVPoolHost(HiSparseHostPoolMixin, HostKVCache):
                     page_size=self.page_size,
                     direction=TransferDirection.D2H,
                 )
-            elif self.layout == "layer_first":
+            elif self.layout == "layer_first_kv_split":
                 # D2H covers the target pool only (no draft), mirroring
                 # page_first_kv_split's single native buffer call.
                 native = self._native_infos[0].native_buffers()

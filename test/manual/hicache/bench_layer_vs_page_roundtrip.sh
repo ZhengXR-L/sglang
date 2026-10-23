@@ -48,6 +48,8 @@ run_one() {
         --hicache-ratio 2.5 \
         --mem-fraction-static 0.75 \
         --max-total-tokens 16384 \
+        --device npu \
+        --attention-backend ascend \
         --log-level info \
         > "$server_log" 2>&1 &
 
