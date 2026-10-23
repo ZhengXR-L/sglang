@@ -460,6 +460,14 @@ class DeepSeekV4PagedHostPool(HiSparseHostPoolMixin, HostKVCache):
     ):
         if not self._has_transfer_indices(host_indices, device_indices):
             return
+        logger.info(
+            "HiCache DSV4 D2H pool=%s layout=%s io_backend=%s tokens=%d layers=%d",
+            self.pool_name,
+            self.layout,
+            io_backend,
+            host_indices.numel(),
+            self.layer_num,
+        )
         if (
             host_indices.numel() % self.slot_page_size != 0
             or device_indices.numel() % self.slot_page_size != 0
@@ -569,6 +577,14 @@ class DeepSeekV4PagedHostPool(HiSparseHostPoolMixin, HostKVCache):
     ):
         if not self._has_transfer_indices(host_indices, device_indices):
             return
+        logger.info(
+            "HiCache DSV4 H2D pool=%s layout=%s io_backend=%s layer=%d tokens=%d",
+            self.pool_name,
+            self.layout,
+            io_backend,
+            layer_id,
+            host_indices.numel(),
+        )
         if (
             host_indices.numel() % self.slot_page_size != 0
             or device_indices.numel() % self.slot_page_size != 0
@@ -961,6 +977,14 @@ class DeepSeekV4StateHostPool(HostKVCache):
     ):
         if host_indices is None or device_indices is None:
             return
+        logger.info(
+            "HiCache DSV4 D2H pool=%s layout=%s io_backend=%s tokens=%d layers=%d",
+            self.pool_name,
+            self.layout,
+            io_backend,
+            host_indices.numel(),
+            self.layer_num,
+        )
         host_rows = self._to_page_indices(host_indices)
         device_rows = self._to_page_indices(device_indices)
         if io_backend == "kernel" and self.layout == "layer_first":
@@ -1057,6 +1081,14 @@ class DeepSeekV4StateHostPool(HostKVCache):
     ):
         if host_indices is None or device_indices is None:
             return
+        logger.info(
+            "HiCache DSV4 H2D pool=%s layout=%s io_backend=%s layer=%d tokens=%d",
+            self.pool_name,
+            self.layout,
+            io_backend,
+            layer_id,
+            host_indices.numel(),
+        )
         host_rows = self._to_page_indices(host_indices)
         device_rows = self._to_page_indices(device_indices)
         if io_backend == "kernel" and self.layout == "layer_first":

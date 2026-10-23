@@ -27,6 +27,11 @@ import re
 import sys
 import urllib.request
 
+try:
+    from transformers import AutoTokenizer
+except Exception:  # noqa: BLE001
+    AutoTokenizer = None
+
 _NUM_RE = re.compile(r"[-+]?\d+(?:\.\d+)?")
 
 
@@ -52,8 +57,18 @@ def post_completion(base_url: str, prompt: str, max_tokens: int, timeout: int = 
         return json.loads(resp.read().decode("utf-8"))["choices"][0]["text"]
 
 
-def _filler(words: int, sentence: str, sent_words: int) -> str:
-    return sentence * max(1, words // sent_words)
+def _filler_to_tokens(tok, sentence: str, target_tokens: int) -> str:
+    """Repeat ``sentence`` until the concatenation reaches ``target_tokens``.
+
+    Sizes the filler by token count (via the model tokenizer) instead of a word
+    estimate so the prompt never exceeds ``--max-total-tokens``.
+    """
+    per = len(tok.encode(sentence, add_special_tokens=False))
+    n = max(1, target_tokens // per)
+    text = sentence * n
+    while len(tok.encode(text, add_special_tokens=False)) < target_tokens:
+        text += sentence
+    return text
 
 
 def main() -> int:
@@ -64,28 +79,41 @@ def main() -> int:
         default="/home/l00889655/sglang/e2e_layer_first_logs/roundtrip_server.log",
     )
     ap.add_argument("--needle", type=int, default=48219)
-    ap.add_argument("--doc-words", type=int, default=16000)
-    ap.add_argument("--evict-words", type=int, default=26000)
+    ap.add_argument(
+        "--model-path",
+        default="/mnt/paas/weights/DeepSeek-Coder-V2-Lite-Instruct",
+    )
+    ap.add_argument("--doc-tokens", type=int, default=10000)
+    ap.add_argument("--evict-tokens", type=int, default=14000)
     ap.add_argument("--max-tokens", type=int, default=64)
     args = ap.parse_args()
+
+    if AutoTokenizer is None:
+        print(
+            "ERROR: transformers.AutoTokenizer is required to size the prompt "
+            "by token count.",
+            file=sys.stderr,
+        )
+        return 2
+
+    tok = AutoTokenizer.from_pretrained(args.model_path)
 
     sentence = (
         "The wind carried dry leaves across the empty field while a distant "
         "train passed under the grey evening sky. "
     )
-    sent_words = len(sentence.split())
     needle_sentence = f"The secret passcode is {args.needle}. "
 
-    doc = needle_sentence + _filler(args.doc_words, sentence, sent_words)
-    evict = _filler(args.evict_words, sentence, sent_words)
+    doc = needle_sentence + _filler_to_tokens(tok, sentence, args.doc_tokens)
+    evict = _filler_to_tokens(tok, sentence, args.evict_tokens)
 
     query = "Question: what is the secret passcode?\nAnswer:"
     doc_prompt = doc + "\n\n" + query
     evict_prompt = evict + "\n\nQuestion: what is 2 + 3?\nAnswer:"
 
     print(
-        f"roundtrip: needle={args.needle} doc_words~={args.doc_words} "
-        f"evict_words~={args.evict_words}",
+        f"roundtrip: needle={args.needle} doc_tokens~={args.doc_tokens} "
+        f"evict_tokens~={args.evict_tokens}",
         flush=True,
     )
 

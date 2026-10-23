@@ -18,8 +18,8 @@ NPU_DEVICES="${NPU_DEVICES:-8}"
 BASE_URL="${BASE_URL:-http://$HOST:$PORT}"
 LOG_DIR="${LOG_DIR:-/home/l00889655/sglang/e2e_layer_first_logs}"
 NEEDLE="${NEEDLE:-48219}"
-DOC_WORDS="${DOC_WORDS:-16000}"
-EVICT_WORDS="${EVICT_WORDS:-26000}"
+DOC_TOKENS="${DOC_TOKENS:-10000}"
+EVICT_TOKENS="${EVICT_TOKENS:-14000}"
 
 mkdir -p "$LOG_DIR"
 SERVER_LOG="$LOG_DIR/roundtrip_server.log"
@@ -97,8 +97,9 @@ python "$(dirname "$0")/e2e_layer_first_roundtrip.py" \
     --base-url "$BASE_URL" \
     --server-log "$SERVER_LOG" \
     --needle "$NEEDLE" \
-    --doc-words "$DOC_WORDS" \
-    --evict-words "$EVICT_WORDS"
+    --model-path "$MODEL_PATH" \
+    --doc-tokens "$DOC_TOKENS" \
+    --evict-tokens "$EVICT_TOKENS"
 
 echo "done."
 exit 0
