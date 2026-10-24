@@ -14,15 +14,16 @@ HOST="${HOST:-127.0.0.1}"
 NPU_DEVICES="${NPU_DEVICES:-8}"
 LOG_DIR="${LOG_DIR:-/home/l00889655/sglang/e2e_layer_first_logs}"
 NUM_PROMPTS="${NUM_PROMPTS:-10}"
-PROMPT_TOKENS="${PROMPT_TOKENS:-1500}"
+PROMPT_TOKENS="${PROMPT_TOKENS:-2000}"
 MAX_TOKENS="${MAX_TOKENS:-64}"
 
 mkdir -p "$LOG_DIR"
 
 export ASCEND_RT_VISIBLE_DEVICES="$NPU_DEVICES"
 export SGLANG_HICACHE_HOST_MEM_BACKEND=memfabric
-# Keep the container's CANN site-packages (provides `acl`) on PYTHONPATH.
-export PYTHONPATH="/home/l00889655/sglang/sglang/python:${PYTHONPATH:-}"
+# 容器默认 PYTHONPATH 不含 CANN site-packages，会 import acl 失败并回退 Transformers
+# 后触发 KeyError: 'sglang'。必须显式补上 CANN 路径。
+export PYTHONPATH="/home/l00889655/sglang/sglang/python:/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:/usr/local/Ascend/cann-9.1.0/python/site-packages:${PYTHONPATH:-}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
@@ -45,7 +46,7 @@ run_one() {
         --hicache-mem-layout "$layout" \
         --hicache-io-backend kernel_ascend \
         --hicache-write-policy write_through \
-        --hicache-ratio 2.5 \
+        --hicache-ratio 3.0 \
         --mem-fraction-static 0.75 \
         --max-total-tokens 16384 \
         --device npu \

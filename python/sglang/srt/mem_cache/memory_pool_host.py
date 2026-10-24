@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from typing import Optional
 
@@ -40,6 +41,7 @@ if _is_npu:
     from sgl_kernel_npu.kvcacheio import TransferDirection, transfer_kv_dim_exchange
 
 logger = logging.getLogger(__name__)
+_dsv4_aiv_logged = set()
 
 
 from sglang.srt.mem_cache.pool_host import HostKVCache
@@ -54,8 +56,117 @@ from sglang.srt.mem_cache.pool_host.common import (
     make_kernel_ptr_table,
 )
 from sglang.srt.mem_cache.pool_host.hisparse import HiSparseHostPoolMixin
+from sglang.srt.mem_cache.pool_host.npu_memfabric import (
+    alloc_with_memfabric,
+    ascendc_io_enabled,
+    memfabric_host_memory_enabled,
+    to_device_no_sync,
+    track_pinned_staging,
+)
 
 # ---- V4 Compressed KV Host Pools ----
+
+
+def _dsv4_ascendc_page_meta(
+    *,
+    device_buffer: torch.Tensor,
+    host_buffer: torch.Tensor,
+    device_rows: torch.Tensor,
+    host_rows: torch.Tensor,
+    host_dva: int,
+    item_bytes: int,
+    layer_id: int,
+    layer_num: int,
+    layout: str,
+    direction: TransferDirection,
+) -> list[int]:
+    """Build one DSV4 pool/layer descriptor using compact page IDs.
+
+    kv_exchange_copy reads indices[p * page_size] // page_size. Passing one
+    page ID per entry with page_size=1 avoids expanding C4/C128/SWA native
+    token indices or state ring slots. Each device layer is a separate tensor.
+    """
+    if layout != "layer_first_kv_split":
+        raise ValueError(f"DSV4 AscendC requires layer_first_kv_split, got {layout}")
+    if device_rows.numel() != host_rows.numel():
+        raise ValueError("DSV4 AscendC device/host page counts differ")
+    if not device_buffer.is_contiguous() or not host_buffer.is_contiguous():
+        raise ValueError("DSV4 AscendC page buffers must be contiguous")
+    device_page_pitch = device_buffer.stride(0) * device_buffer.element_size()
+    if device_page_pitch != item_bytes:
+        raise ValueError("DSV4 AscendC device page width differs from host row")
+    host_page_pitch = host_buffer.stride(0) * host_buffer.element_size()
+    if host_page_pitch != item_bytes or layer_id >= layer_num:
+        raise ValueError("DSV4 AscendC invalid host page stride or layer")
+
+    return [
+        1, device_rows.numel(), 1, direction.value,
+        device_rows.data_ptr(), host_rows.data_ptr(),
+        1, 0,
+        device_buffer.data_ptr(), host_dva, 0, device_page_pitch,
+        host_page_pitch, 0, item_bytes, 0, 1,
+    ]
+
+
+def _dsv4_ascendc_page_copy(
+    *,
+    pool_name: str,
+    device_buffer: torch.Tensor,
+    host_buffer: torch.Tensor,
+    device_rows: torch.Tensor,
+    host_rows: torch.Tensor,
+    item_bytes: int,
+    layer_id: int,
+    layer_num: int,
+    layout: str,
+    direction: TransferDirection,
+) -> None:
+    """Transfer one DSV4 pool/layer with Memfabric's AIV copy kernel."""
+    from memfabric_hybrid import offload
+
+    device = device_buffer.device
+    if device_rows.device.type != "npu":
+        device_rows = to_device_no_sync(device_rows.to(dtype=torch.int64), device)
+    if host_rows.device.type != "npu":
+        host_rows = to_device_no_sync(host_rows.to(dtype=torch.int64), device)
+    stream = torch.npu.current_stream()
+    device_rows.record_stream(stream)
+    host_rows.record_stream(stream)
+    host_dva = offload.get_dva(host_buffer.data_ptr())
+    if host_dva == 0:
+        raise ValueError("DSV4 AscendC host pool is not Memfabric-mapped")
+    vals = _dsv4_ascendc_page_meta(
+        device_buffer=device_buffer,
+        host_buffer=host_buffer,
+        device_rows=device_rows,
+        host_rows=host_rows,
+        host_dva=host_dva,
+        item_bytes=item_bytes,
+        layer_id=layer_id,
+        layer_num=layer_num,
+        layout=layout,
+        direction=direction,
+    )
+    pinned_meta = torch.tensor(vals, dtype=torch.int64, pin_memory=True)
+    meta = torch.empty(pinned_meta.shape, dtype=torch.int64, device=device)
+    meta.copy_(pinned_meta, non_blocking=True)
+    track_pinned_staging(pinned_meta)
+    ret = offload.kv_exchange_copy(meta, device)
+    if ret != 0:
+        raise RuntimeError(f"DSV4 kv_exchange_copy failed with code {ret}")
+    if os.environ.get("SGLANG_DSV4_AIV_TRACE") == "1":
+        log_key = (pool_name, direction)
+        if log_key not in _dsv4_aiv_logged:
+            _dsv4_aiv_logged.add(log_key)
+            logger.info(
+                "HiCache DSV4 AIV kv_exchange_copy %s pool=%s layout=%s pages=%d layer=%d bytes_per_page=%d",
+                direction.name,
+                pool_name,
+                layout,
+                device_rows.numel(),
+                layer_id,
+                item_bytes,
+            )
 
 
 class LogicalHostPool:
@@ -240,6 +351,14 @@ class DeepSeekV4PagedHostPool(HiSparseHostPoolMixin, HostKVCache):
         self.page_size = slot_page_size
         self.size = num_host_pages * slot_page_size
         self.layout = layout
+        if layout == "layer_first_kv_split":
+            if not _is_npu:
+                raise ValueError("DSV4 layer_first_kv_split requires NPU")
+            if not memfabric_host_memory_enabled():
+                raise ValueError(
+                    "DSV4 layer_first_kv_split on NPU requires "
+                    "SGLANG_HICACHE_HOST_MEM_BACKEND=memfabric"
+                )
         self.size_per_token = item_bytes
         self.start_layer = 0
         self.end_layer = self.layer_num
@@ -250,7 +369,11 @@ class DeepSeekV4PagedHostPool(HiSparseHostPoolMixin, HostKVCache):
 
         requested_bytes = self.layer_num * num_host_pages * self.item_bytes
         available_bytes = host_memory_budget_bytes()
-        if requested_bytes > available_bytes:
+        if requested_bytes > available_bytes and not (
+            _is_npu
+            and self.layout == "layer_first_kv_split"
+            and memfabric_host_memory_enabled()
+        ):
             raise ValueError(
                 f"Not enough host memory for V4 paged pool {pool_name}. "
                 f"Requesting {requested_bytes / 1e9:.2f} GB but only have "
@@ -265,9 +388,16 @@ class DeepSeekV4PagedHostPool(HiSparseHostPoolMixin, HostKVCache):
             if isinstance(self.gpu_device, torch.device)
             else str(self.gpu_device)
         )
-        alloc_func = ALLOC_MEMORY_FUNCS[_alloc_key]
+        use_memfabric = (
+            _alloc_key == "npu"
+            and self.layout == "layer_first_kv_split"
+            and memfabric_host_memory_enabled()
+        )
+        alloc_func = (
+            alloc_with_memfabric if use_memfabric else ALLOC_MEMORY_FUNCS[_alloc_key]
+        )
         self.data_refs = []
-        if self.layout == "layer_first":
+        if self.layout in ("layer_first", "layer_first_kv_split"):
             self.kv_buffer = [
                 alloc_func(
                     (num_host_pages, self.item_bytes),
@@ -533,6 +663,24 @@ class DeepSeekV4PagedHostPool(HiSparseHostPoolMixin, HostKVCache):
                 dst_indices=host_rows,
                 page_size=1,
             )
+        elif (
+            io_backend == "kernel_ascend"
+            and self.layout == "layer_first_kv_split"
+            and ascendc_io_enabled()
+        ):
+            for l in range(self.layer_num):
+                _dsv4_ascendc_page_copy(
+                    pool_name=self.pool_name,
+                    device_buffer=self.device_buffers[l],
+                    host_buffer=self.kv_buffer[l],
+                    device_rows=device_rows,
+                    host_rows=host_rows,
+                    item_bytes=self.item_bytes,
+                    layer_id=l,
+                    layer_num=self.layer_num,
+                    layout=self.layout,
+                    direction=TransferDirection.D2H,
+                )
         elif io_backend == "kernel_ascend":
             # HiCache keeps KV-derived pools in the FULL logical coordinate
             # space. Ascend consumes the native slots of the shaped device
@@ -637,6 +785,23 @@ class DeepSeekV4PagedHostPool(HiSparseHostPoolMixin, HostKVCache):
                 dst_indices=device_rows,
                 layer_id=layer_id,
                 page_size=1,
+            )
+        elif (
+            io_backend == "kernel_ascend"
+            and self.layout == "layer_first_kv_split"
+            and ascendc_io_enabled()
+        ):
+            _dsv4_ascendc_page_copy(
+                pool_name=self.pool_name,
+                device_buffer=self.device_buffers[layer_id],
+                host_buffer=self.kv_buffer[layer_id],
+                device_rows=device_rows,
+                host_rows=host_rows,
+                item_bytes=self.item_bytes,
+                layer_id=layer_id,
+                layer_num=self.layer_num,
+                layout=self.layout,
+                direction=TransferDirection.H2D,
             )
         elif io_backend == "kernel_ascend":
             # NPU whole-page H2D via Ascend dim-exchange op, for layer_id only.
@@ -763,6 +928,14 @@ class DeepSeekV4StateHostPool(HostKVCache):
         self.page_size = swa_page_size
         self.size = num_host_pages * swa_page_size
         self.layout = layout
+        if layout == "layer_first_kv_split":
+            if not _is_npu:
+                raise ValueError("DSV4 layer_first_kv_split requires NPU")
+            if not memfabric_host_memory_enabled():
+                raise ValueError(
+                    "DSV4 layer_first_kv_split on NPU requires "
+                    "SGLANG_HICACHE_HOST_MEM_BACKEND=memfabric"
+                )
         self.start_layer = 0
         self.end_layer = self.layer_num
         self.lock = threading.RLock()
@@ -776,7 +949,11 @@ class DeepSeekV4StateHostPool(HostKVCache):
 
         requested_bytes = self.layer_num * num_host_pages * self.state_page_bytes
         available_bytes = host_memory_budget_bytes()
-        if requested_bytes > available_bytes:
+        if requested_bytes > available_bytes and not (
+            _is_npu
+            and self.layout == "layer_first_kv_split"
+            and memfabric_host_memory_enabled()
+        ):
             raise ValueError(
                 f"Not enough host memory for V4 state pool {pool_name}. "
                 f"Requesting {requested_bytes / 1e9:.2f} GB but only have "
@@ -790,9 +967,18 @@ class DeepSeekV4StateHostPool(HostKVCache):
             if isinstance(self.gpu_device, torch.device)
             else str(self.gpu_device)
         )
-        alloc_func = ALLOC_MEMORY_FUNCS[_state_alloc_key]
+        use_memfabric = (
+            _state_alloc_key == "npu"
+            and self.layout == "layer_first_kv_split"
+            and memfabric_host_memory_enabled()
+        )
+        alloc_func = (
+            alloc_with_memfabric
+            if use_memfabric
+            else ALLOC_MEMORY_FUNCS[_state_alloc_key]
+        )
         self.data_refs = []
-        if self.layout == "layer_first":
+        if self.layout in ("layer_first", "layer_first_kv_split"):
             self.kv_buffer = [
                 alloc_func(
                     (num_host_pages, self.state_page_bytes),
@@ -1034,6 +1220,24 @@ class DeepSeekV4StateHostPool(HostKVCache):
                 dst_indices=host_rows,
                 page_size=1,
             )
+        elif (
+            io_backend == "kernel_ascend"
+            and self.layout == "layer_first_kv_split"
+            and ascendc_io_enabled()
+        ):
+            for l in range(self.layer_num):
+                _dsv4_ascendc_page_copy(
+                    pool_name=self.pool_name,
+                    device_buffer=self.device_page_views[l],
+                    host_buffer=self.kv_buffer[l],
+                    device_rows=device_rows,
+                    host_rows=host_rows,
+                    item_bytes=self.state_page_bytes,
+                    layer_id=l,
+                    layer_num=self.layer_num,
+                    layout=self.layout,
+                    direction=TransferDirection.D2H,
+                )
         elif io_backend == "kernel_ascend":
             # Ascend copies ring_size state slots for each page-aligned SWA row.
             # _ring_op_indices expands device and host rows into operator indices.
@@ -1125,6 +1329,23 @@ class DeepSeekV4StateHostPool(HostKVCache):
                 dst_indices=device_rows,
                 layer_id=layer_id,
                 page_size=1,
+            )
+        elif (
+            io_backend == "kernel_ascend"
+            and self.layout == "layer_first_kv_split"
+            and ascendc_io_enabled()
+        ):
+            _dsv4_ascendc_page_copy(
+                pool_name=self.pool_name,
+                device_buffer=self.device_page_views[layer_id],
+                host_buffer=self.kv_buffer[layer_id],
+                device_rows=device_rows,
+                host_rows=host_rows,
+                item_bytes=self.state_page_bytes,
+                layer_id=layer_id,
+                layer_num=self.layer_num,
+                layout=self.layout,
+                direction=TransferDirection.H2D,
             )
         elif io_backend == "kernel_ascend":
             # NPU whole-page H2D via Ascend dim-exchange op, for layer_id only.

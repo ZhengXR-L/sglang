@@ -28,8 +28,10 @@ EP_SIZE="${EP_SIZE:-8}"
 BASE_URL="${BASE_URL:-http://$HOST:$PORT}"
 LOG_DIR="${LOG_DIR:-/home/l00889655/sglang/e2e_layer_first_logs}"
 NEEDLE="${NEEDLE:-48219}"
-DOC_TOKENS="${DOC_TOKENS:-6144}"
-EVICT_TOKENS="${EVICT_TOKENS:-12288}"
+DOC_TOKENS="${DOC_TOKENS:-4096}"
+EVICT_TOKENS="${EVICT_TOKENS:-4608}"
+SWA_FULL_TOKENS_RATIO="${SWA_FULL_TOKENS_RATIO:-1.0}"
+HICACHE_LAYOUT="${HICACHE_LAYOUT:-layer_first}"
 
 mkdir -p "$LOG_DIR"
 SERVER_LOG="$LOG_DIR/roundtrip_dsv4_server.log"
@@ -67,6 +69,22 @@ echo "devices:    $NPU_DEVICES  (tp=$TP_SIZE ep=$EP_SIZE)"
 echo "base url:   $BASE_URL"
 echo "server log: $SERVER_LOG"
 
+if [ "${ENABLE_HICACHE:-1}" = "1" ]; then
+    hicache_args=(
+        --enable-hicache
+        --hicache-mem-layout "$HICACHE_LAYOUT"
+        --hicache-io-backend kernel_ascend
+        --hicache-write-policy write_through
+        --hicache-ratio 2.5
+    )
+else
+    if [ "${DISABLE_RADIX_CACHE:-1}" = "1" ]; then
+        hicache_args=(--disable-radix-cache)
+    else
+        hicache_args=()
+    fi
+fi
+
 # ---------------------------------------------------------------------------
 # 1. Launch the server. host pool (ratio) is larger than the device pool
 #    (--max-total-tokens) so evicted L1 tokens are retained in L2.
@@ -84,6 +102,7 @@ python -m sglang.launch_server \
     --quantization modelslim \
     --kv-cache-dtype bfloat16 \
     --page-size 128 \
+    --swa-full-tokens-ratio "$SWA_FULL_TOKENS_RATIO" \
     --mem-fraction-static 0.8 \
     --moe-a2a-backend deepep \
     --deepep-mode auto \
@@ -91,11 +110,7 @@ python -m sglang.launch_server \
     --random-seed 0 \
     --cuda-graph-backend-prefill disabled \
     --cuda-graph-backend-decode disabled \
-    --enable-hicache \
-    --hicache-mem-layout layer_first \
-    --hicache-io-backend kernel_ascend \
-    --hicache-write-policy write_through \
-    --hicache-ratio 2.5 \
+    "${hicache_args[@]}" \
     --max-total-tokens 8192 \
     --log-level info \
     > "$SERVER_LOG" 2>&1 &

@@ -17,6 +17,7 @@ from sglang.srt.mem_cache.hybrid_cache import hybrid_pool_assembler as assembler
 from sglang.srt.mem_cache.memory_pool_host import (
     DeepSeekV4PagedHostPool,
     DeepSeekV4StateHostPool,
+    _dsv4_ascendc_page_meta,
 )
 from sglang.srt.mem_cache.unified_cache.components import (
     CacheTransferPhase,
@@ -97,6 +98,130 @@ class TestDSV4DecodeCapacity(CustomTestCase):
 
 
 class TestDSV4HostViews(CustomTestCase):
+    def test_ascendc_route_is_limited_to_layer_first_kv_split(self):
+        host_indices = torch.tensor([8, 9], dtype=torch.int64)
+        device_indices = torch.tensor([4, 5], dtype=torch.int64)
+        direction = SimpleNamespace(D2H=SimpleNamespace(value=2))
+        for layout in (
+            "layer_first",
+            "page_first",
+            "page_first_direct",
+            "layer_first_kv_split",
+        ):
+            pool = DeepSeekV4PagedHostPool.__new__(DeepSeekV4PagedHostPool)
+            pool.pool_name = "c4"
+            pool.layout = layout
+            pool.slot_page_size = 2
+            pool.num_host_pages = 6
+            pool.layer_num = 1
+            pool.item_bytes = 256
+            pool.page_aligned_only = True
+            pool.device_buffers = [torch.empty((6, 2, 1, 128), dtype=torch.uint8)]
+            if layout in ("layer_first", "layer_first_kv_split"):
+                pool.kv_buffer = [torch.empty((6, 256), dtype=torch.uint8)]
+            elif layout == "page_first":
+                pool.kv_buffer = torch.empty((6, 1, 256), dtype=torch.uint8)
+            else:
+                pool.kv_buffer = torch.empty((6, 1, 1, 256), dtype=torch.uint8)
+            with (
+                patch("sglang.srt.mem_cache.memory_pool_host._is_npu", True),
+                patch(
+                    "sglang.srt.mem_cache.memory_pool_host.ascendc_io_enabled",
+                    return_value=True,
+                ),
+                patch(
+                    "sglang.srt.mem_cache.memory_pool_host._dsv4_ascendc_page_copy"
+                ) as aiv_copy,
+                patch(
+                    "sglang.srt.mem_cache.memory_pool_host.transfer_kv_dim_exchange",
+                    create=True,
+                ) as legacy_copy,
+                patch(
+                    "sglang.srt.mem_cache.memory_pool_host.TransferDirection",
+                    direction,
+                    create=True,
+                ),
+            ):
+                pool.backup_from_device_all_layer(
+                    None, host_indices, device_indices, "kernel_ascend"
+                )
+                self.assertEqual(aiv_copy.call_count, int(layout == "layer_first_kv_split"))
+                self.assertEqual(
+                    legacy_copy.call_count, int(layout != "layer_first_kv_split")
+                )
+
+    def test_kv_split_rejects_other_platform_and_missing_memfabric(self):
+        paged_kwargs = dict(
+            pool_name="c4",
+            device_buffers=[torch.empty((2, 2, 1, 4), dtype=torch.uint8)],
+            item_bytes=8,
+            num_host_pages=2,
+            slot_page_size=2,
+            layout="layer_first_kv_split",
+        )
+        state_kwargs = dict(
+            pool_name="state",
+            state_pools=[SimpleNamespace()],
+            num_host_pages=2,
+            swa_page_size=2,
+            layout="layer_first_kv_split",
+        )
+        for cls, kwargs in (
+            (DeepSeekV4PagedHostPool, paged_kwargs),
+            (DeepSeekV4StateHostPool, state_kwargs),
+        ):
+            with patch("sglang.srt.mem_cache.memory_pool_host._is_npu", False):
+                with self.assertRaisesRegex(ValueError, "requires NPU"):
+                    cls(**kwargs)
+            with (
+                patch("sglang.srt.mem_cache.memory_pool_host._is_npu", True),
+                patch(
+                    "sglang.srt.mem_cache.memory_pool_host.memfabric_host_memory_enabled",
+                    return_value=False,
+                ),
+            ):
+                with self.assertRaisesRegex(ValueError, "requires.*memfabric"):
+                    cls(**kwargs)
+
+    def test_ascendc_page_meta_requires_layer_first_kv_split(self):
+        device_rows = torch.tensor([2, 3], dtype=torch.int64)
+        host_rows = torch.tensor([4, 1], dtype=torch.int64)
+        for width in (6, 12):  # C4/Indexer page row and state ring page row.
+            device_layers = [torch.empty((5, width), dtype=torch.uint8) for _ in range(3)]
+            host = [torch.empty((6, width), dtype=torch.uint8) for _ in range(3)]
+            for layer in range(3):
+                host_buffer = host[layer]
+                kwargs = dict(
+                    device_buffer=device_layers[layer],
+                    host_buffer=host_buffer,
+                    device_rows=device_rows,
+                    host_rows=host_rows,
+                    host_dva=host_buffer.data_ptr(),
+                    item_bytes=width,
+                    layer_id=layer,
+                    layer_num=3,
+                    direction=SimpleNamespace(value=2),
+                )
+                with self.assertRaises(ValueError):
+                    _dsv4_ascendc_page_meta(layout="layer_first", **kwargs)
+                with self.assertRaises(ValueError):
+                    _dsv4_ascendc_page_meta(layout="page_first", **kwargs)
+                meta = _dsv4_ascendc_page_meta(
+                    layout="layer_first_kv_split", **kwargs
+                )
+                self.assertEqual(meta[:4], [1, 2, 1, 2])
+                self.assertEqual(meta[6], 1)
+                self.assertEqual(meta[11:17], [width, width, 0, width, 0, 1])
+                for device_page, host_page in zip(device_rows, host_rows):
+                    dev_addr = meta[8] + int(device_page) * meta[11]
+                    host_addr = meta[9] + int(host_page) * meta[12]
+                    self.assertEqual(
+                        dev_addr, device_layers[layer][int(device_page)].data_ptr()
+                    )
+                    self.assertEqual(
+                        host_addr, host[layer][int(host_page)].data_ptr()
+                    )
+
     @staticmethod
     def _layout_buffer(raw, layout):
         if layout == "layer_first":
