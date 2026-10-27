@@ -72,7 +72,7 @@ elif _is_xpu:
         transfer_kv_per_layer_mla_pf_lf,
     )
 if _is_npu:
-    from sgl_kernel_npu.kvcacheio import TransferDirection, transfer_kv_dim_exchange
+    from sgl_kernel_npu.kvcacheio import TransferDirection, transfer_kv_sparse_copy
 
 logger = logging.getLogger(__name__)
 
@@ -806,7 +806,7 @@ class MLATokenToKVPoolHost(HiSparseHostPoolMixin, HostKVCache):
                         index_k_layer_num=ik_num,
                     )
                     return
-                # transfer_kv_dim_exchange transfers all layers in one call;
+                # transfer_kv_sparse_copy transfers all layers in one call;
                 # only invoke it on the first owned layer to avoid duplicate
                 # work on subsequent per-layer iterations.
                 if device_layer_id != 0:
@@ -818,7 +818,7 @@ class MLATokenToKVPoolHost(HiSparseHostPoolMixin, HostKVCache):
                     host_index_k,
                     host_index_k_scale,
                 ) in self._npu_transfer_pool_slices():
-                    transfer_kv_dim_exchange(
+                    transfer_kv_sparse_copy(
                         device_indices=device_indices,
                         host_indices=host_indices,
                         device_k=native.k,
@@ -1123,7 +1123,7 @@ class MLATokenToKVPoolHost(HiSparseHostPoolMixin, HostKVCache):
                     host_index_k,
                     host_index_k_scale,
                 ) in self._npu_transfer_pool_slices():
-                    transfer_kv_dim_exchange(
+                    transfer_kv_sparse_copy(
                         device_indices=device_indices,
                         host_indices=host_indices,
                         device_k=native.k,

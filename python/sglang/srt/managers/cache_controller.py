@@ -967,8 +967,11 @@ class HiCacheController:
                 to_device_no_sync,
             )
 
-            if ascendc_io_enabled():
-                # The fused acc_offload kv_exchange kernel reads the token
+            if (
+                self.mem_pool_host.layout == "page_first_kv_split"
+                or ascendc_io_enabled()
+            ):
+                # Both LOCAL kv_exchange and LOCAL_URMA sparse_copy read token
                 # indices directly on the device; keeping them there avoids
                 # the D2H sync that would serialize the layer-group pipeline.
                 # (The legacy memcpy2d exchange op still wants CPU indices and
