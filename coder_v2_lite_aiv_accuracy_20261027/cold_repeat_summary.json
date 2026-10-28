@@ -1,0 +1,131 @@
+{
+  "selected": 11,
+  "completed": 11,
+  "cold_answer_match_count": 11,
+  "cold_token_match_count": 11,
+  "both_cold_count": 11,
+  "results": [
+    {
+      "qid": "test-7",
+      "ground_truth": "1.6E+2",
+      "prior_a": "1.2E+2",
+      "prior_r": "1.6E+2",
+      "cold_1": "1.2E+2",
+      "cold_2": "1.2E+2",
+      "cold_answer_match": true,
+      "cold_token_match": true,
+      "both_cold": true
+    },
+    {
+      "qid": "test-8",
+      "ground_truth": "45",
+      "prior_a": "135",
+      "prior_r": "475",
+      "cold_1": "135",
+      "cold_2": "135",
+      "cold_answer_match": true,
+      "cold_token_match": true,
+      "both_cold": true
+    },
+    {
+      "qid": "test-21",
+      "ground_truth": "14",
+      "prior_a": "17",
+      "prior_r": "14",
+      "cold_1": "17",
+      "cold_2": "17",
+      "cold_answer_match": true,
+      "cold_token_match": true,
+      "both_cold": true
+    },
+    {
+      "qid": "test-64",
+      "ground_truth": "3E+2",
+      "prior_a": "1E+2",
+      "prior_r": "2E+2",
+      "cold_1": "1E+2",
+      "cold_2": "1E+2",
+      "cold_answer_match": true,
+      "cold_token_match": true,
+      "both_cold": true
+    },
+    {
+      "qid": "test-65",
+      "ground_truth": "36",
+      "prior_a": "36",
+      "prior_r": "12",
+      "cold_1": "36",
+      "cold_2": "36",
+      "cold_answer_match": true,
+      "cold_token_match": true,
+      "both_cold": true
+    },
+    {
+      "qid": "test-66",
+      "ground_truth": "48",
+      "prior_a": "48",
+      "prior_r": "44",
+      "cold_1": "48",
+      "cold_2": "48",
+      "cold_answer_match": true,
+      "cold_token_match": true,
+      "both_cold": true
+    },
+    {
+      "qid": "test-75",
+      "ground_truth": "6E+1",
+      "prior_a": "6E+1",
+      "prior_r": "7.5",
+      "cold_1": "6E+1",
+      "cold_2": "6E+1",
+      "cold_answer_match": true,
+      "cold_token_match": true,
+      "both_cold": true
+    },
+    {
+      "qid": "test-85",
+      "ground_truth": "44",
+      "prior_a": "44",
+      "prior_r": "48",
+      "cold_1": "44",
+      "cold_2": "44",
+      "cold_answer_match": true,
+      "cold_token_match": true,
+      "both_cold": true
+    },
+    {
+      "qid": "test-89",
+      "ground_truth": "24",
+      "prior_a": "18",
+      "prior_r": "32",
+      "cold_1": "18",
+      "cold_2": "18",
+      "cold_answer_match": true,
+      "cold_token_match": true,
+      "both_cold": true
+    },
+    {
+      "qid": "test-99",
+      "ground_truth": "58",
+      "prior_a": "58",
+      "prior_r": "4E+1",
+      "cold_1": "58",
+      "cold_2": "58",
+      "cold_answer_match": true,
+      "cold_token_match": true,
+      "both_cold": true
+    },
+    {
+      "qid": "test-102",
+      "ground_truth": "26",
+      "prior_a": "52",
+      "prior_r": "51",
+      "cold_1": "52",
+      "cold_2": "52",
+      "cold_answer_match": true,
+      "cold_token_match": true,
+      "both_cold": true
+    }
+  ],
+  "error": null
+}

@@ -1,0 +1,17 @@
+{
+  "planned_questions": 100,
+  "covered_questions": 100,
+  "path_coverage": 1.0,
+  "all_questions_complete": true,
+  "baseline_accuracy": 0.84,
+  "replay_accuracy": 0.81,
+  "baseline_correct_completed": 84,
+  "replay_correct_completed": 81,
+  "answer_match_count": 89,
+  "token_match_count": 46,
+  "absolute_accuracy_gate": null,
+  "error": null,
+  "passed": false,
+  "protocol": "original first-five test-row shots; serial A/B/R with per-question K/V D2H and H2D completion",
+  "cold_definition": "flush establishes KV-cache cold, not process/state-memory cold"
+}
