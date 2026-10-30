@@ -189,7 +189,11 @@ def set_default_server_args(args: "ServerArgs"):
             declare_resolution(
                 args,
                 "set_default_server_args",
-                hicache_mem_layout="page_first_kv_split",
+                hicache_mem_layout=(
+                    "layer_first_kv_split"
+                    if cfg.hicache_mem_layout == "layer_first_kv_split"
+                    else "page_first_kv_split"
+                ),
             )
         else:
             declare_resolution(

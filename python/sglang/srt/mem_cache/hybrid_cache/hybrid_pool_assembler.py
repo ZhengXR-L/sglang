@@ -1334,7 +1334,7 @@ def build_hybrid_mamba_stack(
     # to page_first_direct.
     mamba_layout = (
         "page_first_direct"
-        if get_memory().hicache_mem_layout == "page_first_kv_split"
+        if get_memory().hicache_mem_layout in ("page_first_kv_split", "layer_first_kv_split")
         else get_memory().hicache_mem_layout
     )
     mamba_host_pool = build_mamba_host_pool(
@@ -1581,7 +1581,9 @@ def _build_mha_mla_host_pool(
     # The global layout is page_first_kv_split only when the target model
     # uses MLA; that layout is MLA-specific, so MHA draft pools must use
     # the non-MLA layout (NPU default: page_first_direct).
-    if isinstance(pool, MHATokenToKVPool) and layout == "page_first_kv_split":
+    if isinstance(pool, MHATokenToKVPool) and layout in (
+        "page_first_kv_split", "layer_first_kv_split"
+    ):
         layout = "page_first_direct"
 
     kwargs = dict(
