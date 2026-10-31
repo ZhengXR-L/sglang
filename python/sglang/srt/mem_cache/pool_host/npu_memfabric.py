@@ -116,6 +116,10 @@ def alloc_with_memfabric(
     for d in dims:
         numel *= d
     tensor = offload.empty(list(dims), dtype=dtype)
+    # kv_exchange resolves interior host views through this registration table.
+    from sgl_kernel_npu.host_memory import register_host_memory
+
+    register_host_memory(tensor)
     _memfabric_state["allocated_bytes"] += numel * dtype.itemsize
     return tensor
 
