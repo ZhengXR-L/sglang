@@ -63,10 +63,11 @@ elif _is_xpu:
     )
 
 if _is_npu:
-    from sgl_kernel_npu.kvcacheio import TransferDirection, transfer_kv_dim_exchange
     from sgl_kernel_npu.operators.mem_cache import (
         transfer_kv_all_layer_kv_split,
+        transfer_kv_all_layer_kv_split_lf_pf,
         transfer_kv_per_layer_kv_split,
+        transfer_kv_per_layer_kv_split_pf_lf,
     )
 
 logger = logging.getLogger(__name__)
@@ -286,9 +287,12 @@ class DeepSeekV4PagedHostPool(HiSparseHostPoolMixin, HostKVCache):
         self.page_size = slot_page_size
         self.size = num_host_pages * slot_page_size
         self.layout = layout
-        if self.layout == "layer_first_kv_split" and not memfabric_host_memory_enabled():
+        if self.layout in (
+            "layer_first_kv_split",
+            "page_first_kv_split",
+        ) and not memfabric_host_memory_enabled():
             raise ValueError(
-                "DeepSeek V4 layer_first_kv_split requires "
+                "DeepSeek V4 split layout requires "
                 "SGLANG_HICACHE_HOST_MEM_BACKEND=memfabric"
             )
         self.size_per_token = item_bytes
@@ -318,7 +322,7 @@ class DeepSeekV4PagedHostPool(HiSparseHostPoolMixin, HostKVCache):
         )
         use_memfabric = (
             _alloc_key == "npu"
-            and self.layout == "layer_first_kv_split"
+            and self.layout in ("layer_first_kv_split", "page_first_kv_split")
             and memfabric_host_memory_enabled()
         )
         alloc_func = (
@@ -362,6 +366,14 @@ class DeepSeekV4PagedHostPool(HiSparseHostPoolMixin, HostKVCache):
                 pin_memory=self.pin_memory,
                 allocator=self.allocator,
                 registration_granularity_bytes=self.layer_num * self.item_bytes,
+            )
+        elif self.layout == "page_first_kv_split":
+            self.kv_buffer = alloc_func(
+                (num_host_pages, self.layer_num, 1, self.item_bytes),
+                dtype=self.dtype,
+                device=self.device,
+                pin_memory=self.pin_memory,
+                allocator=self.allocator,
             )
         else:
             raise ValueError(f"Unsupported layout: {self.layout}")
@@ -421,13 +433,13 @@ class DeepSeekV4PagedHostPool(HiSparseHostPoolMixin, HostKVCache):
         if self.layout == "layer_first_kv_split":
             layer_buffer = self.kv_buffer[l]
             shape = (1, self.num_host_pages, *page_shape)
-        elif self.layout == "page_first_direct":
+        elif self.layout == "page_first_kv_split":
             layer_buffer = self.kv_buffer[:, l, 0, :]
             shape = (self.num_host_pages, 1, *page_shape)
         else:
             raise ValueError(
                 f"{self.pool_name} _host_page_view: kernel_ascend requires "
-                "page_first_direct or layer_first_kv_split layout, "
+                "page_first_kv_split or layer_first_kv_split layout, "
                 f"got {self.layout!r}"
             )
         return layer_buffer.view(device_buffer.dtype).view(shape)
@@ -624,18 +636,21 @@ class DeepSeekV4PagedHostPool(HiSparseHostPoolMixin, HostKVCache):
                         page_size=native_page_size,
                         impl="aiv",
                     )
-                else:
+                elif self.layout == "page_first_kv_split":
                     host_view = self._host_page_view(l)
-                    transfer_kv_dim_exchange(
+                    transfer_kv_all_layer_kv_split_lf_pf(
+                        device_indices=native_device_indices,
+                        host_indices=native_host_indices,
                         device_k=dev_view,
                         host_k=host_view,
                         device_v=torch.empty(0, device=dev_view.device),
                         host_v=torch.empty(0, device="cpu"),
-                        device_indices=native_device_indices,
-                        host_indices=native_host_indices,
                         page_size=native_page_size,
-                        direction=TransferDirection.D2H,
+                        host_layer_start=0,
+                        impl="aiv",
                     )
+                else:
+                    raise ValueError(f"Unsupported Ascend layout: {self.layout}")
         else:
             raise ValueError(
                 f"Unsupported V4 paged host layout/backend: {self.layout}/{io_backend}"
@@ -731,18 +746,22 @@ class DeepSeekV4PagedHostPool(HiSparseHostPoolMixin, HostKVCache):
                     host_layer_id=0,
                     impl="aiv",
                 )
-            else:
+            elif self.layout == "page_first_kv_split":
                 host_view = self._host_page_view(layer_id)
-                transfer_kv_dim_exchange(
+                transfer_kv_per_layer_kv_split_pf_lf(
+                    device_indices=native_device_indices,
+                    host_indices=native_host_indices,
                     device_k=dev_view,
                     host_k=host_view,
                     device_v=torch.empty(0, device=dev_view.device),
                     host_v=torch.empty(0, device="cpu"),
-                    device_indices=native_device_indices,
-                    host_indices=native_host_indices,
                     page_size=native_page_size,
-                    direction=TransferDirection.H2D,
+                    device_layer_id=0,
+                    host_layer_id=0,
+                    impl="aiv",
                 )
+            else:
+                raise ValueError(f"Unsupported Ascend layout: {self.layout}")
         else:
             raise ValueError(
                 f"Unsupported V4 paged host layout/backend: {self.layout}/{io_backend}"
@@ -878,12 +897,15 @@ class DeepSeekV4StateHostPool(HostKVCache):
         )
         use_memfabric = (
             _state_alloc_key == "npu"
-            and self.layout == "layer_first_kv_split"
+            and self.layout in ("layer_first_kv_split", "page_first_kv_split")
             and memfabric_host_memory_enabled()
         )
-        if self.layout == "layer_first_kv_split" and not use_memfabric:
+        if self.layout in (
+            "layer_first_kv_split",
+            "page_first_kv_split",
+        ) and not use_memfabric:
             raise ValueError(
-                "DeepSeek V4 state layer_first_kv_split requires NPU Memfabric"
+                "DeepSeek V4 state split layout requires NPU Memfabric"
             )
         alloc_func = (
             alloc_with_memfabric
@@ -928,6 +950,14 @@ class DeepSeekV4StateHostPool(HostKVCache):
                 pin_memory=self.pin_memory,
                 allocator=self.allocator,
                 registration_granularity_bytes=(self.layer_num * self.state_page_bytes),
+            )
+        elif self.layout == "page_first_kv_split":
+            self.kv_buffer = alloc_func(
+                (num_host_pages, self.layer_num, 1, self.state_page_bytes),
+                dtype=self.dtype,
+                device=self.device,
+                pin_memory=self.pin_memory,
+                allocator=self.allocator,
             )
         else:
             raise ValueError(f"Unsupported layout: {self.layout}")
@@ -1032,13 +1062,13 @@ class DeepSeekV4StateHostPool(HostKVCache):
         if self.layout == "layer_first_kv_split":
             layer_buffer = self.kv_buffer[l]
             shape = (1, self.num_host_pages, self.ring_size, 1, last_dim)
-        elif self.layout == "page_first_direct":
+        elif self.layout == "page_first_kv_split":
             layer_buffer = self.kv_buffer[:, l, 0, :]
             shape = (self.num_host_pages, 1, self.ring_size, 1, last_dim)
         else:
             raise ValueError(
                 f"{self.pool_name} _state_host_page_view: kernel_ascend requires "
-                "page_first_direct or layer_first_kv_split layout, "
+                "page_first_kv_split or layer_first_kv_split layout, "
                 f"got {self.layout!r}"
             )
         return layer_buffer.view(dtype).view(shape)
@@ -1163,17 +1193,20 @@ class DeepSeekV4StateHostPool(HostKVCache):
                         page_size=self.ring_size,
                         impl="aiv",
                     )
-                else:
-                    transfer_kv_dim_exchange(
+                elif self.layout == "page_first_kv_split":
+                    transfer_kv_all_layer_kv_split_lf_pf(
+                        device_indices=dev_op_indices,
+                        host_indices=host_op_indices,
                         device_k=dev_view,
                         host_k=host_view,
                         device_v=torch.empty(0, device=dev_view.device),
                         host_v=torch.empty(0, device="cpu"),
-                        device_indices=dev_op_indices,
-                        host_indices=host_op_indices,
                         page_size=self.ring_size,
-                        direction=TransferDirection.D2H,
+                        host_layer_start=0,
+                        impl="aiv",
                     )
+                else:
+                    raise ValueError(f"Unsupported Ascend layout: {self.layout}")
         else:
             raise ValueError(
                 f"Unsupported V4 state host layout/backend: {self.layout}/{io_backend}"
@@ -1258,17 +1291,21 @@ class DeepSeekV4StateHostPool(HostKVCache):
                     host_layer_id=0,
                     impl="aiv",
                 )
-            else:
-                transfer_kv_dim_exchange(
+            elif self.layout == "page_first_kv_split":
+                transfer_kv_per_layer_kv_split_pf_lf(
+                    device_indices=dev_op_indices,
+                    host_indices=host_op_indices,
                     device_k=dev_view,
                     host_k=host_view,
                     device_v=torch.empty(0, device=dev_view.device),
                     host_v=torch.empty(0, device="cpu"),
-                    device_indices=dev_op_indices,
-                    host_indices=host_op_indices,
                     page_size=R,
-                    direction=TransferDirection.H2D,
+                    device_layer_id=0,
+                    host_layer_id=0,
+                    impl="aiv",
                 )
+            else:
+                raise ValueError(f"Unsupported Ascend layout: {self.layout}")
         else:
             raise ValueError(
                 f"Unsupported V4 state host layout/backend: {self.layout}/{io_backend}"

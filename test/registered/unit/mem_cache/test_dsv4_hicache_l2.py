@@ -95,7 +95,7 @@ class TestDSV4HostViews(CustomTestCase):
             pages * layers * state_page_bytes, dtype=torch.uint8
         ).reshape(pages, layers, state_page_bytes)
 
-        for layout in ("page_first_direct", "layer_first_kv_split"):
+        for layout in ("page_first_kv_split", "layer_first_kv_split"):
             with self.subTest(pool="paged", layout=layout):
                 host = DeepSeekV4PagedHostPool.__new__(DeepSeekV4PagedHostPool)
                 host.pool_name = "c4"
@@ -122,7 +122,7 @@ class TestDSV4HostViews(CustomTestCase):
                     torch.equal(view.reshape(pages, -1), expected.reshape(pages, -1))
                 )
 
-        for layout in ("page_first_direct", "layer_first_kv_split"):
+        for layout in ("page_first_kv_split", "layer_first_kv_split"):
             with self.subTest(pool="state", layout=layout):
                 host = DeepSeekV4StateHostPool.__new__(DeepSeekV4StateHostPool)
                 host.pool_name = "c4_state"

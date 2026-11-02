@@ -955,7 +955,8 @@ def _reserve_dsv4_paged_memfabric(
 ) -> None:
     if not (
         is_npu()
-        and get_memory().hicache_mem_layout == "layer_first_kv_split"
+        and get_memory().hicache_mem_layout
+        in ("layer_first_kv_split", "page_first_kv_split")
         and memfabric_host_memory_enabled()
     ):
         return
