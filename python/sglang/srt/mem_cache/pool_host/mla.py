@@ -687,7 +687,7 @@ class MLATokenToKVPoolHost(HiSparseHostPoolMixin, HostKVCache):
                 host_layer_id=host_layer_id,
                 device_index_layer_id=index_slot,
                 host_index_layer_id=index_slot,
-                impl="auto",
+                impl="aiv" if self.layout == "layer_first_kv_split" else "auto",
             )
             if torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:
                 print(
@@ -998,7 +998,7 @@ class MLATokenToKVPoolHost(HiSparseHostPoolMixin, HostKVCache):
                     host_index_k_scale=self.index_k_scale_buffer if is_target else None,
                     page_size=self.page_size,
                     host_layer_start=host_layer_start,
-                    impl="auto",
+                    impl="aiv" if self.layout == "layer_first_kv_split" else "auto",
                 )
                 if torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:
                     print(

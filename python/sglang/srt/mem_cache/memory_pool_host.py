@@ -622,6 +622,7 @@ class DeepSeekV4PagedHostPool(HiSparseHostPoolMixin, HostKVCache):
                         device_v=torch.empty(0, device=dev_view.device),
                         host_v=torch.empty(0, device="cpu"),
                         page_size=native_page_size,
+                        impl="aiv",
                     )
                 else:
                     host_view = self._host_page_view(l)
@@ -728,6 +729,7 @@ class DeepSeekV4PagedHostPool(HiSparseHostPoolMixin, HostKVCache):
                     page_size=native_page_size,
                     device_layer_id=0,
                     host_layer_id=0,
+                    impl="aiv",
                 )
             else:
                 host_view = self._host_page_view(layer_id)
@@ -1159,6 +1161,7 @@ class DeepSeekV4StateHostPool(HostKVCache):
                         device_v=torch.empty(0, device=dev_view.device),
                         host_v=torch.empty(0, device="cpu"),
                         page_size=self.ring_size,
+                        impl="aiv",
                     )
                 else:
                     transfer_kv_dim_exchange(
@@ -1253,6 +1256,7 @@ class DeepSeekV4StateHostPool(HostKVCache):
                     page_size=R,
                     device_layer_id=0,
                     host_layer_id=0,
+                    impl="aiv",
                 )
             else:
                 transfer_kv_dim_exchange(
