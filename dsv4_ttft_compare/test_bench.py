@@ -1,7 +1,9 @@
 import importlib.util
 import json
 from pathlib import Path
+import sys
 import tempfile
+import types
 import unittest
 from unittest.mock import patch
 
@@ -16,6 +18,28 @@ class Response:
 
 
 class Tests(unittest.TestCase):
+    def test_prepare_builds_plan_without_external_test_results(self):
+        class Tokenizer:
+            bos_token_id = 1
+            all_special_ids = [0, 1]
+            vocab_size = 256
+
+            def encode(self, text, add_special_tokens=False):
+                return [2 + ord(char) % 254 for char in text]
+
+        transformers = types.SimpleNamespace(
+            AutoTokenizer=types.SimpleNamespace(from_pretrained=lambda *args, **kwargs: Tokenizer())
+        )
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(sys.modules, {'transformers': transformers}):
+            plan_path = Path(tmp) / 'plan.json'
+            b.prepare(tmp, plan_path, repeats=1)
+            plan = json.loads(plan_path.read_text(encoding='utf-8'))
+            self.assertEqual(plan['generator'], 'builtin_arithmetic_v1')
+            self.assertEqual([len(case['input_ids']) for case in plan['cases']],
+                             [8192 + 128, 32768 + 128, 61440 + 128])
+            self.assertEqual(len(plan['eviction_input_ids']), 65536)
+            self.assertTrue(all(b.sha(case['input_ids']) == case['sha256'] for case in plan['cases']))
+
     def test_metadata_is_not_first_token(self):
         events=[b'data: {"meta_info": {}}\n',
                 b'data: {"output_ids": [1], "text": "x", "meta_info": {}}\n',b'data: [DONE]\n']
@@ -44,7 +68,7 @@ class Tests(unittest.TestCase):
                 self.assertFalse((root/'results/summary.json').exists())
 
     def test_resolved_page_layout_required(self):
-        info={'hicache_mem_layout':'page_first_direct','hicache_io_backend':'kernel_ascend','enable_dp_attention':True,'enable_dp_lm_head':True,
+        info={'hicache_mem_layout':'page_first_kv_split','hicache_io_backend':'kernel_ascend','enable_dp_attention':True,'enable_dp_lm_head':True,
               'tp_size':8,'attn_dp_size':8,'speculative_algorithm':None,'hicache_write_policy':'write_through','stream_interval':1,'model_path':'/model',
               'internal_states':[{'memory_usage':{'token_capacity':65920}} for _ in range(8)]}
         self.assertEqual(b.preflight(info,{'model_path':'/model'},'page_first'),65920)

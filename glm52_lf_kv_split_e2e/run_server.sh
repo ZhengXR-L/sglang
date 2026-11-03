@@ -21,8 +21,6 @@ PY
 export SGLANG_HICACHE_HOST_MEM_BACKEND=memfabric
 SGLANG_ROOT="${SGLANG_ROOT:-/home/l00889655/sglang/sglang}"
 KERNEL_ROOT="${KERNEL_ROOT:-/home/l00889655/sglang/sgl-kernel-npu}"
-test "$(git -C "$SGLANG_ROOT" branch --show-current)" = cjz_op
-test "$(git -C "$KERNEL_ROOT" branch --show-current)" = npu/hicache-sparse-copy
 export HCCL_BUFFSIZE=512
 export PYTHONPATH="$SGLANG_ROOT/python:$KERNEL_ROOT/python/sgl_kernel_npu:$ASCEND_TOOLKIT_ROOT/python/site-packages:$CANN_PYTHON_SITE_PACKAGES:${PYTHONPATH:-}"
 python3 -c 'import acl; import sglang.srt.models.glm4_moe; import sgl_kernel_npu.operators.mem_cache.kv_transfer as op; print("KV transfer operators:", op.__file__); assert all(hasattr(op, x) for x in ("transfer_kv_all_layer_kv_split", "transfer_kv_per_layer_kv_split"))'

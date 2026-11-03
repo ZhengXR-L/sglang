@@ -21,8 +21,12 @@ root.mkdir(exist_ok=False)
 scripts = root/'scripts'; scripts.mkdir()
 for name in ('run_server.sh', 'bench.py', 'run_compare.py'):
     shutil.copy2(src/name, scripts/name)
-repo = '/home/l00889655/sglang/sglang'
-source_plan = '/home/l00889655/sglang/gsm8k_aiv_npu_20261027_100_01/plan_100.json'
+repo = os.environ.get('SGLANG_ROOT', '/home/l00889655/sglang/sglang')
+kernel_repo = os.environ.get('KERNEL_ROOT', '/home/l00889655/sglang/sgl-kernel-npu')
+port = int(os.environ.get('PORT', '32430'))
+model_path = os.environ.get('MODEL_PATH', '/mnt/paas/weights/DeepSeek-V4-Flash-w8a8-mtp')
+if not (Path(model_path) / 'tokenizer.json').is_file():
+    raise FileNotFoundError(f'Missing tokenizer.json in {model_path}')
 stamp = lambda: datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
@@ -59,24 +63,31 @@ def wait_devices(block):
         time.sleep(30)
 
 
-manifest = {'start_utc': stamp(), 'devices': devices, 'source_plan': source_plan,
+manifest = {'start_utc': stamp(), 'devices': devices,
+    'plan_generator': 'builtin_arithmetic_v1',
     'commit': subprocess.check_output(['git','-C',repo,'rev-parse','HEAD'], text=True).strip(),
+    'kernel_commit': subprocess.check_output(['git','-C',kernel_repo,'rev-parse','HEAD'], text=True).strip(),
+    'model_path': model_path, 'port': port,
     'git_status': subprocess.check_output(['git','-C',repo,'status','--short'], text=True),
+    'kernel_git_status': subprocess.check_output(['git','-C',kernel_repo,'status','--short'], text=True),
     'script_sha256': {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in scripts.iterdir()},
     'order': ['layer_first','page_first','page_first','layer_first'], 'blocks': []}
 save('manifest.json', manifest)
 status = {'start_utc': stamp(), 'error': None, 'finished_blocks': 0}
 server = None
 try:
-    with socket.socket() as sock: sock.bind(('127.0.0.1',32430))
-    if capture([sys.executable,str(scripts/'bench.py'),'prepare','--source-plan',source_plan,
+    with socket.socket() as sock: sock.bind(('127.0.0.1',port))
+    if capture([sys.executable,str(scripts/'bench.py'),'prepare','--model-path',model_path,
                 '--output',str(root/'plan.json')], 'prepare.log',180):
         raise RuntimeError('Plan preparation failed')
+    manifest['plan_sha256'] = hashlib.sha256((root/'plan.json').read_bytes()).hexdigest()
+    save('manifest.json', manifest)
     for index, layout in enumerate(manifest['order']):
         name = f'{index+1}_{layout}'
         wait_devices(name)
         current = subprocess.check_output(['git','-C',repo,'rev-parse','HEAD'],text=True).strip()
-        if current != manifest['commit']:
+        kernel_current = subprocess.check_output(['git','-C',kernel_repo,'rev-parse','HEAD'],text=True).strip()
+        if current != manifest['commit'] or kernel_current != manifest['kernel_commit']:
             raise RuntimeError('Source HEAD changed while waiting; stop rather than compare different versions')
         block = root/name; block.mkdir()
         manifest['blocks'].append({'name': name, 'layout': layout})
@@ -84,24 +95,26 @@ try:
         save('stage.json', {'time': stamp(), 'stage':'starting', 'block':name})
         capture(['npu-smi','info'], f'{name}/npu_before.log')
         capture(['bash','-lc','uptime; free -h'], f'{name}/host_before.log')
-        env = {**os.environ, 'NPU_DEVICES':devices, 'LAYOUT':layout, 'PORT':'32430', 'SGLANG_ROOT':repo}
+        env = {**os.environ, 'NPU_DEVICES':devices, 'LAYOUT':layout, 'PORT':str(port),
+               'SGLANG_ROOT':repo, 'KERNEL_ROOT':kernel_repo, 'MODEL_PATH':model_path}
         with (block/'server.log').open('w') as log:
             server = subprocess.Popen(['bash',str(scripts/'run_server.sh')], env=env, stdout=log,
                                       stderr=subprocess.STDOUT, start_new_session=True)
-        save(f'{name}/environment.json', {k:v for k,v in env.items() if k in ('NPU_DEVICES','LAYOUT','PORT','SGLANG_ROOT')})
+        save(f'{name}/environment.json', {k:v for k,v in env.items() if k in ('NPU_DEVICES','LAYOUT','PORT','SGLANG_ROOT','KERNEL_ROOT','MODEL_PATH')})
         (block/'server.pid').write_text(str(server.pid))
         deadline = time.monotonic()+900
         while True:
             if server.poll() is not None: raise RuntimeError(f'{name}: server exited {server.returncode}')
             try:
-                with urllib.request.urlopen('http://127.0.0.1:32430/health',timeout=3) as resp:
+                with urllib.request.urlopen(f'http://127.0.0.1:{port}/health',timeout=3) as resp:
                     if resp.status == 200: break
             except Exception: pass
             if time.monotonic() > deadline: raise TimeoutError(f'{name}: health timeout')
             time.sleep(5)
         save('stage.json', {'time':stamp(),'stage':'measuring','block':name})
         rc = capture([sys.executable,'-u',str(scripts/'bench.py'),'eval','--plan',str(root/'plan.json'),
-                      '--output',str(block/'results'),'--layout',layout], f'{name}/bench.log',7200)
+                      '--output',str(block/'results'),'--layout',layout,
+                      '--base-url',f'http://127.0.0.1:{port}'], f'{name}/bench.log',7200)
         if rc: raise RuntimeError(f'{name}: benchmark exited {rc}')
         os.killpg(server.pid,signal.SIGTERM)
         try: server.wait(timeout=45)
@@ -125,4 +138,4 @@ finally:
     save('run_status.json',status)
     save('stage.json', {'stage':'finished',**status})
     print(json.dumps(status,ensure_ascii=False,indent=2),flush=True)
-sys.exit(0 if status['error'] is None else 1)
+sys.exit(0 if status['error'] is None and status['report_exit'] == 0 else 1)

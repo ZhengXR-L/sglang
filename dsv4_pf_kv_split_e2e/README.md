@@ -1,7 +1,7 @@
 # DeepSeek-V4-Flash page_first_kv_split AIV 双向验证
 
-远端 SGLang 使用 `cjz_op`（至少 `51a335ce3b`），sgl-kernel-npu 使用
-`npu/hicache-sparse-copy`（至少 `c84c47ab`）。默认模型
+运行所用 SGLang 和 sgl-kernel-npu 源码需支持 NPU DSV4 的
+`page_first_kv_split` 布局及其 AIV 双向搬运算子。默认模型
 `/mnt/paas/weights/DeepSeek-V4-Flash-w8a8-mtp` 有 tokenizer 和索引列出的全部
 70 个 W8A8 权重分片。服务采用 TP8/EP8/attention-DP8、`modelslim`、BF16 KV、
 `--hicache-mem-layout page_first`、`kernel_ascend`、`write_through`、Memfabric。

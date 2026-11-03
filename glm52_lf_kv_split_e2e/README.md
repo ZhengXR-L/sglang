@@ -18,8 +18,8 @@ python3 -u /home/l00889655/sglang/glm52_lf_kv_split_e2e/run_e2e.py \
 
 最后三个参数为输出目录、八张物理 NPU、题数。先用 3 题冒烟；
 正式运行改成 `100` 题并换新的输出目录。端口占用时修改 `PORT`。
-脚本自行启动、等待、关闭专用服务。运行前会检查 SGLang 分支
-`cjz_op` 和 sgl-kernel-npu 分支 `npu/hicache-sparse-copy`。
+脚本自行启动、等待、关闭专用服务。启动脚本会检查所需的 KV split
+算子是否可导入，不限制两个源码仓库的分支名。
 
 ```bash
 cat /home/l00889655/sglang/glm52_lf_kv_split_smoke_001/results/summary.json
@@ -74,7 +74,7 @@ export PYTHONPATH="$AUDIT_DIR/boot:$SGLANG_ROOT/python:$PYTHONPATH"
 ```
 
 最终 `PYTHONPATH` 前缀为审计钩子、SGLang 源码（两次）、
-sgl-kernel-npu 分支源码、toolkit Python、CANN Python，然后接原有值。
+sgl-kernel-npu 源码、toolkit Python、CANN Python，然后接原有值。
 脚本还会 `source` customize vendor、custom_transformer vendor、
 Ascend toolkit、ATB 的 `set_env` 脚本；这些外部脚本额外导出的
 运行库和算子变量取决于容器中的安装版本。启动时原有的其他环境

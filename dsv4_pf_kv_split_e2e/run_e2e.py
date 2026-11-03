@@ -41,15 +41,11 @@ missing_shards = [name for name in set(weight_index['weight_map'].values())
                   if not (model_path / name).is_file()]
 if missing_shards:
     raise FileNotFoundError(f'Missing model shards: {missing_shards[:5]}')
-for repo, expected in ((sglang_root, 'cjz_op'), (kernel_root, 'npu/hicache-sparse-copy')):
-    actual = subprocess.check_output(['git', '-C', str(repo), 'branch', '--show-current'], text=True).strip()
-    if actual != expected:
-        raise RuntimeError(f'{repo} must be on {expected}, got {actual}')
 root.mkdir(exist_ok=False)
 scripts = root / 'scripts'
 scripts.mkdir()
 for name in ('gsm8k_aiv.py', 'aiv_audit_hook.py', 'run_server.sh', 'report_npu.py',
-             'run_e2e.py', 'npu_dsv4_layout.patch'):
+             'run_e2e.py'):
     shutil.copy2(source / name, scripts / name)
 
 

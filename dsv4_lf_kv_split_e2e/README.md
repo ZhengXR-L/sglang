@@ -1,9 +1,8 @@
 # DeepSeek-V4-Flash 的 DSV4 HiCache AIV 双向验证
 
-本目录针对远端 SGLang `cjz_op` 与 sgl-kernel-npu `npu/hicache-sparse-copy`。
-当前 `cjz_op` 原有 NPU 参数解析会把 DSV4 的 `layer_first` 改为
-`page_first_direct`；已应用本目录的 `npu_dsv4_layout.patch`，令 DSV4
-保留 `layer_first_kv_split`。运行前需确保这处补丁仍在工作区。
+运行所用 SGLang 源码需将 NPU DSV4 的 `layer_first` 解析为
+`layer_first_kv_split`，并在双向搬运中调用 AIV 算子；当前源码已包含这些实现，
+无需额外应用布局补丁。sgl-kernel-npu 需提供对应的 KV split 算子。
 默认权重为 `/mnt/paas/weights/DeepSeek-V4-Flash-w8a8-mtp`，该目录的
 tokenizer、索引和 70 个 W8A8 权重分片已核对齐全，服务使用 `modelslim` 加载。
 原 W8A8 路径 `/home/weights/DeepSeek-V4-Flash-0731-w8a8` 是失效软连接，
