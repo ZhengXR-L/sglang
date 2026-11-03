@@ -125,3 +125,12 @@ NPU stream event 完成，并要求 D2H、H2D 都显式选择 `impl="aiv"`。
 GLM-5.2 经 `MLATokenToKVPoolHost` 调用这两个算子；此测试覆盖
 GLM 的 MLA 路径，不覆盖 DSV4 专用 host pool。NPU event 完成不
 等同于 KV 逐字节比对。
+
+## 2026-11-03 100 题实测
+
+物理卡 `0,1,2,3,4,5,8,9` 的完整报告见 `report_100_mix8_20261103.md`；
+远端逐题请求、响应和审计证据保存在
+`/home/l00889655/sglang/glm52_lf_kv_split_100_mix8_20261103_aiv`。
+100/100 题完成 K、V、Indexer K 全层双向 AIV 覆盖且 R 为纯 L2 命中；
+A 准确 97/100，R 准确 94/100，答案一致 93/100，因此本次精度测试未通过。
+独立证据复核退出码为 0。具体不一致题号及答案见报告。

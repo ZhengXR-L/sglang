@@ -58,3 +58,6 @@ stream Event 完成，才计入该池该层覆盖。逐题要求七池全部物�
 
 结果目录包含 `report.md`、`results_50/summary.json`、逐题 verdict、
 `audit/calls-*.jsonl`、服务日志和冻结的脚本副本。只审计指定 DP rank，默认 0。
+
+已归档前八卡 50 题报告：`report_50_20261102.md`。报告保留了运行当时
+SGLang 与 sgl-kernel-npu 的源码提交和完整的双向 AIV 覆盖结果。

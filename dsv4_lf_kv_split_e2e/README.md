@@ -104,3 +104,6 @@ python3 -m sglang.launch_server \
 
 输出目录包含 `server.log`、`eval.log`、`audit/calls-*.jsonl`、
 逐题请求与响应、`results_<题数>/summary.json`、`run_status.json` 和 `report.md`。
+
+已归档的完整测试报告：`report_100_back8_20261102.md`（后八卡 100 题）。
+报告保留了运行当时的源码提交和工作区状态。
