@@ -1,5 +1,6 @@
 import functools
 import logging
+import os
 import sys
 from enum import IntEnum
 from typing import TYPE_CHECKING, Callable
@@ -188,7 +189,21 @@ def set_default_server_args(args: "ServerArgs"):
         )
         from sglang.srt.configs.model_config import is_deepseek_v4
 
-        if use_mla_backend(args) or is_deepseek_v4(model_config_of(args).hf_config):
+        # Only DSV4 and MLA have migrated to AIV transfers so far;
+        # all remaining paths will migrate soon.
+        if is_deepseek_v4(model_config_of(args).hf_config):
+            os.environ.setdefault("SGLANG_HICACHE_HOST_MEM_BACKEND", "acl")
+            declare_resolution(
+                args,
+                "set_default_server_args",
+                hicache_mem_layout=(
+                    "layer_first"
+                    if cfg.hicache_mem_layout == "layer_first"
+                    else "page_first"
+                ),
+            )
+        elif use_mla_backend(args):
+            os.environ.setdefault("SGLANG_HICACHE_HOST_MEM_BACKEND", "acl")
             declare_resolution(
                 args,
                 "set_default_server_args",
