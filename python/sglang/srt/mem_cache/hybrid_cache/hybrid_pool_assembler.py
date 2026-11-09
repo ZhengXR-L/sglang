@@ -955,12 +955,7 @@ def _reserve_dsv4_paged_host_memory(
     c4_state_global_layers: list[int],
     c128_layer_mapping: dict[int, int],
 ) -> None:
-    if not (
-        is_npu()
-        and get_memory().hicache_mem_layout
-        in ("layer_first_kv_split", "page_first_kv_split")
-        and (memfabric_host_memory_enabled() or acl_host_memory_enabled())
-    ):
+    if not is_npu():
         return
 
     import torch
@@ -969,9 +964,20 @@ def _reserve_dsv4_paged_host_memory(
     # MemFabric fixes its reservation at the first allocation; ACL tracks
     # registration on each allocation.
     paged_blocks = []
+    layer_first = get_memory().hicache_mem_layout == "layer_first"
+
+    def add_blocks(layer_bytes):
+        if not layer_bytes:
+            return
+        # Match actual allocator calls: one block per layer for layer_first,
+        # one block for the entire pool for page-first layouts.
+        if layer_first:
+            paged_blocks.extend(layer_bytes)
+        else:
+            paged_blocks.append(sum(layer_bytes))
 
     def add_paged(buffers, item_bytes, pages):
-        paged_blocks.append(len(buffers) * pages * item_bytes)
+        add_blocks([pages * item_bytes] * len(buffers))
 
     if has_paged_swa:
         add_paged(
@@ -992,15 +998,15 @@ def _reserve_dsv4_paged_host_memory(
                 kvcache.compress_state_pools,
                 kvcache.indexer_compress_state_pools,
             ):
-                state_bytes = 0
+                state_blocks = []
                 for layer_id in c4_state_global_layers:
                     pool = state_pools[layer_id]
-                    state_bytes += (
+                    state_blocks.append(
                         swa_num_host_pages
                         * pool.ring_size
                         * pool.kv_score_buffer.kv_score[0].nbytes
                     )
-                paged_blocks.append(state_bytes)
+                add_blocks(state_blocks)
     if c128_layer_mapping:
         buffers, item_bytes = _dsv4_compressed_region_buffers(kvcache, 128)
         add_paged(buffers, item_bytes, c128_num_host_pages)
