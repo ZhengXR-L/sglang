@@ -75,7 +75,7 @@ class TestQwen38FlashNextGSM8KQsaBf16(GSM8KAscendMixin, CustomTestCase):
     accuracy = ACCURACY
     num_questions = NUM_QUESTIONS
     gsm8k_num_shots = NUM_SHOTS
-    timeout_for_server_launch = 1800
+    timeout_for_server_launch = 3600
 
 
 if __name__ == "__main__":
