@@ -2,7 +2,7 @@
 set -euo pipefail
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 source "$HERE/env.sh"
-LAYOUT=${1:?usage: bash run_server.sh layer_first|page_first}
+LAYOUT=${1:?usage: bash run_server.sh page_first_direct}
 MODE=${2:-l2}
 case "$MODE" in
   l2)

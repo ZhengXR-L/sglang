@@ -20,7 +20,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 overall=0
-read -r -a layouts <<< "${LAYOUTS:-layer_first page_first}"
+read -r -a layouts <<< "$LAYOUTS"
 for layout in "${layouts[@]}"; do
   echo "启动 $layout 服务"
   bash "$HERE/run_server.sh" "$layout" "$MODE" > "$OUT/server.$layout.log" 2>&1 &

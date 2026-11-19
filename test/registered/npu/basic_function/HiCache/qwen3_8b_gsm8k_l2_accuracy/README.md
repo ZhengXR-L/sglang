@@ -1,6 +1,6 @@
 # Qwen3-8B GSM8K 精度与 HiCache L2 回载用例
 
-本用例验证 NPU `kernel_ascend` 的 MHA KV 新算子在 `layer_first` 和 `page_first` 两种布局下，KV 从设备写入 Host L2、驱逐后回载时的 GSM8K 精度。2026-11-12 已完成 2 题冒烟和 200 题快速回归；GSM8K 全量精度尚未运行。
+本用例验证 NPU `kernel_ascend` 的 MHA KV 新算子在 `page_first_direct` 布局下，KV 从设备写入 Host L2、驱逐后回载时的 GSM8K 精度。2026-11-12 的 2 题冒烟和 200 题快速回归使用旧版布局名称，属于历史结果；当前代码的 GSM8K 全量精度尚未运行。
 
 ## 三轮流程
 
@@ -8,7 +8,7 @@
 2. 用 **train** 中未参与 few-shot 的不同题目构造长请求，持续填充设备 KV，直到请求输入总量超过设备 KV 容量且观察到设备驱逐；检查 KV Pool 的 D2H token 计数增加。第二轮请求不参与 GSM8K 计分。
 3. 按原顺序重发第一轮完全相同的 token ID，记录逐题答案、正确率、Host 命中数和输出 token ID；检查 KV Pool 的 H2D token 计数增加。对题目独有提示部分能形成完整缓存页的题目，要求第三轮有 Host 命中；不足一页的题目不强制逐题命中。第三轮正确率不低于首轮。若设置 `GSM8K_ACCURACY`，还要求第三轮达到该历史实测阈值。
 
-结果文件分别是 `layer_first.json` 和 `page_first.json`，包含逐题答案、正确性、输出 token ID、Host 命中、两轮准确率及 D2H/H2D 计数增量。输出 token ID 一致数只记录为诊断信息，精度判定以 GSM8K 答案正确率为准。
+当前结果文件为 `page_first_direct.json`，包含逐题答案、正确性、输出 token ID、Host 命中、两轮准确率及 D2H/H2D 计数增量。输出 token ID 一致数只记录为诊断信息，精度判定以 GSM8K 答案正确率为准。
 
 ## 配置与运行方式
 
@@ -53,7 +53,7 @@ print(sgl_kernel_npu.__file__)
 assert hasattr(torch.ops.npu, "kv_exchange")
 PY
 
-# 先验证两种布局的三轮回迁；不使用历史 A3 精度阈值
+# 先验证 page_first_direct 的三轮回迁；不使用历史 A3 精度阈值
 export GSM8K_NUM_QUESTIONS=2
 unset GSM8K_ACCURACY
 bash test/registered/npu/basic_function/HiCache/qwen3_8b_gsm8k_l2_accuracy/run_test.sh /tmp/qwen3_8b_mha_a5_gsm8k_2
@@ -63,18 +63,18 @@ export GSM8K_NUM_QUESTIONS=200
 bash test/registered/npu/basic_function/HiCache/qwen3_8b_gsm8k_l2_accuracy/run_test.sh /tmp/qwen3_8b_mha_a5_gsm8k_200
 ```
 
-- 模型必须通过脚本对 **Qwen3-8B** `config.json` 的结构检查；train/test 路径须分别指向 GSM8K 的原始 JSONL。`NPU_DEVICES` 决定脚本使用的物理卡和 `TP_SIZE`，`PORT` 不得与其他服务冲突。默认按 `layer_first`、`page_first` 顺序启动；若只想定位某一种布局，可暂设 `LAYOUTS=layer_first` 或 `LAYOUTS=page_first`，正式双布局验收时取消该限制。
+- 模型必须通过脚本对 **Qwen3-8B** `config.json` 的结构检查；train/test 路径须分别指向 GSM8K 的原始 JSONL。`NPU_DEVICES` 决定脚本使用的物理卡和 `TP_SIZE`，`PORT` 不得与其他服务冲突。当前只运行 `page_first_direct`；如需显式设置，可用 `LAYOUTS=page_first_direct`。
 - 首次运行保留 `SGLANG_HICACHE_HOST_MEM_BACKEND=acl` 与 `PAGE_SIZE=128`。默认 `MAX_TOTAL_TOKENS=32768`、`HICACHE_RATIO=6`、`FILLER_PROMPT_TOKENS=4096`、`MAX_FILLER_REQUESTS=12` 是历史环境的起点，先核对 A5 的 HBM 和 Host 可用内存。若服务启动失败、未发生驱逐或第三轮未命中 Host，应结合 `server.*.log`、`eval.*.log` 和结果 JSON 调整池容量或 filler 强度；不要仅靠放宽断言让用例通过。
-- 两题只验证三轮流程和回迁路径。200 题用于快速精度回归；正式精度结论须跑满 `GSM8K_NUM_QUESTIONS=1319`，并以**同一 A5 模型、数据、布局和参数配置**的历史实测值设置 `GSM8K_ACCURACY`。历史 A3 的 190/200、192/200 不是 A5 阈值。每次用新输出目录，检查两种布局的 `*.exit_code`、`*.json`、`server.*.log` 和 `eval.*.log`；`device` 模式不测试 Host L2 回载。
+- 两题只验证三轮流程和回迁路径。200 题用于快速精度回归；正式精度结论须跑满 `GSM8K_NUM_QUESTIONS=1319`，并以**同一 A5 模型、数据、布局和参数配置**的历史实测值设置 `GSM8K_ACCURACY`。历史 A3 的 190/200、192/200 不是 A5 阈值。每次用新输出目录，检查 `page_first_direct.exit_code`、`page_first_direct.json`、`server.page_first_direct.log` 和 `eval.page_first_direct.log`；`device` 模式不测试 Host L2 回载。
 
 ### 设备缓存对照模式
 
-为排查首轮与 L2 重放的输出差异，`run_test.sh <output_dir> device` 会关闭 HiCache，不发送第二轮挤出请求，只对相同的 GSM8K 提示执行首轮与重放。对照模式要求没有设备 KV 驱逐、没有 Host 命中或 H2D 回载，并要求每题重放命中设备缓存。它记录准确率和输出 token 一致数，但不把两轮输出不一致直接判为测试失败。`layer_first` 在这个模式下只是结果文件名；没有启用 HiCache 布局。
+为排查首轮与 L2 重放的输出差异，`run_test.sh <output_dir> device` 会关闭 HiCache，不发送第二轮挤出请求，只对相同的 GSM8K 提示执行首轮与重放。对照模式要求没有设备 KV 驱逐、没有 Host 命中或 H2D 回载，并要求每题重放命中设备缓存。它记录准确率和输出 token 一致数，但不把两轮输出不一致直接判为测试失败。`page_first_direct` 在这个模式下只是结果文件名；没有启用 HiCache 布局。
 
 ```bash
 export GSM8K_NUM_QUESTIONS=200
 export MAX_TOTAL_TOKENS=131072  # 容纳两轮之间仍需保留的设备 KV
-export LAYOUTS=layer_first
+export LAYOUTS=page_first_direct
 bash test/registered/npu/basic_function/HiCache/qwen3_8b_gsm8k_l2_accuracy/run_test.sh /path/to/device_control device
 ```
 
@@ -101,7 +101,7 @@ python3 -c 'import sgl_kernel_npu, torch; print(sgl_kernel_npu.__file__); print(
 
 预检应打印私有目录中的 `sgl_kernel_npu/__init__.py` 路径，以及 `True`。`env.sh` 将 `KERNEL_PYTHON_PATH` 放在其他已有的算子包路径之前，服务进程和评测进程因此使用同一份包。该包的 `__init__.py` 会加载其 `lib/libsgl_kernel_npu.so`，从而注册算子。若第二行仍为 `False`，先检查打印的实际导入路径，再核对该目录的 `.so` 是否确实由包含 `kv_exchange` 的构建产物提供；修正后需重启服务进程。
 
-## 两题小规模验证
+## 历史两题小规模验证（旧版布局）
 
 在 `sglang-lzx-B103` 容器、NPU 0 上运行，模型 `/mnt/paas/weights/Qwen3-8B`，GSM8K 数据位于 `/home/l00889655/sglang/gsm8k_{train,test}.jsonl`。本次设 `GSM8K_NUM_QUESTIONS=2`、`MAX_TOTAL_TOKENS=8192`、`HICACHE_RATIO=4`，用 `KERNEL_PYTHON_PATH` 指向已编译的私有 `kv_exchange` 包。没有设置历史精度阈值。
 
@@ -112,7 +112,7 @@ python3 -c 'import sgl_kernel_npu, torch; print(sgl_kernel_npu.__file__); print(
 
 两种布局的用例与总脚本退出码均为 0。首次尝试的失败与解决步骤见上一节。2 题只证明三轮流程、L2 回载及答案一致性，不能据此得出模型精度结论。
 
-## 200 题快速回归
+## 历史 200 题快速回归（旧版布局）
 
 在同一容器的物理 NPU 4 上使用 `/mnt/paas/weights/Qwen3-8B`，设置 `GSM8K_NUM_QUESTIONS=200`、`GSM8K_NUM_SHOTS=8`、`MAX_TOTAL_TOKENS=32768`、`HICACHE_RATIO=6`、`MAX_FILLER_REQUESTS=12`，其余设置由 `env.sh` 提供。本次没有同配置的历史实测精度阈值，故只比较首轮与 L2 重放精度，不宣称达到正式精度门槛。结果目录为 `/home/l00889655/sglang/qwen3_8b_gsm8k_l2_200q_ratio6_phy4_20261112/`。
 

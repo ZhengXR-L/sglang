@@ -2,18 +2,17 @@
 
 ## 测试目的
 
-在真实 Qwen3-8B 推理服务中，分别验证 NPU `kernel_ascend` 的 `layer_first` 和 `page_first` 布局能完成 KV 的 D2H 备份与 H2D 回载。两种布局均须出现 Host 缓存命中，重放请求的输出 token 与首次请求一致。
+在真实 Qwen3-8B 推理服务中，验证 NPU `kernel_ascend` 的 `page_first_direct` 布局能完成 KV 的 D2H 备份与 H2D 回载。重放请求须出现 Host 缓存命中，输出 token 与首次请求一致。
 
 ## 测试原理
 
-入口脚本依次启动两次 Qwen3-8B 服务。每次先核对本地 `config.json` 的 Qwen3-8B 结构，以及 `/model_info` 和 `/server_info` 返回的模型路径、`kernel_ascend`、布局和 HiCache 写策略。随后发送一个基准长提示和多个不同前缀的长提示，使较小的设备 KV 池发生驱逐；最后重放基准提示。
+入口脚本启动一次 Qwen3-8B 服务。先核对本地 `config.json` 的 Qwen3-8B 结构，以及 `/model_info` 和 `/server_info` 返回的模型路径、`kernel_ascend`、布局和 HiCache 写策略。随后发送一个基准长提示和多个不同前缀的长提示，使较小的设备 KV 池发生驱逐；最后重放基准提示。
 
-`write_through` 将 KV 写入 Host Pool；设备驱逐后，重放请求从 Host Pool 回载。用例要求 `/metrics` 中 KV Pool 的 `sglang:hicache_backup_tokens_total` 与 `sglang:load_back_tokens_total` 增加，且重放响应的 `cached_tokens_details.host` 大于零。当前 MHA Host Pool 在 `kernel_ascend` 下按布局分派到如下新算子：
+`write_through` 将 KV 写入 Host Pool；设备驱逐后，重放请求从 Host Pool 回载。用例要求 `/metrics` 中 KV Pool 的 `sglang:hicache_backup_tokens_total` 与 `sglang:load_back_tokens_total` 增加，且重放响应的 `cached_tokens_details.host` 大于零。当前 MHA Host Pool 在 `kernel_ascend` 下调用如下新算子：
 
 | 布局 | D2H | H2D |
 | --- | --- | --- |
-| `layer_first` | `transfer_kv_all_layer_kv_split` | `transfer_kv_per_layer_kv_split` |
-| `page_first` | `transfer_kv_all_layer_kv_split_lf_pf` | `transfer_kv_per_layer_kv_split_pf_lf` |
+| `page_first_direct` | `transfer_kv_all_layer_kv_split_lf_pf` | `transfer_kv_per_layer_kv_split_pf_lf` |
 
 ## 前置依赖
 
@@ -101,11 +100,11 @@ bash test/registered/npu/basic_function/HiCache/qwen3_8b_kv_split_e2e/run_test.s
 bash run_test.sh /path/to/qwen3_8b_kv_split_result
 ```
 
-脚本依次启动、测试并停止两个布局的服务，退出码为总体判定。
+脚本启动、测试并停止 `page_first_direct` 布局的服务，退出码为总体判定。
 
 ## 服务启动命令
 
-`run_test.sh` 对 `LAYOUT=layer_first` 和 `LAYOUT=page_first` 各执行一次以下命令；变量均来自 `env.sh`：
+`run_test.sh` 对 `LAYOUT=page_first_direct` 执行以下命令；变量均来自 `env.sh`：
 
 ```bash
 sglang serve \
@@ -122,9 +121,9 @@ sglang serve \
 
 ## 输出物与判定
 
-输出目录包含 `server.layer_first.log`、`server.page_first.log`、`eval.layer_first.log`、`eval.page_first.log`、`layer_first.json`、`page_first.json`、两个 `*.exit_code`、`report.log` 和 `report.md`。入口脚本在成功、失败或中断时打印这些路径。
+输出目录包含 `server.page_first_direct.log`、`eval.page_first_direct.log`、`page_first_direct.json`、`page_first_direct.exit_code`、`report.log` 和 `report.md`。入口脚本在成功、失败或中断时打印这些路径。
 
-每个布局必须同时满足：服务解析参数正确；D2H/H2D 的 KV token 指标增量均大于零；重放命中 Host；生成 token ID 和文本与首次请求一致。任一条件失败则该布局失败，总体失败。`report.md` 在失败时也会生成，并列出已取得的证据和原因。
+用例必须同时满足：服务解析参数正确；D2H/H2D 的 KV token 指标增量均大于零；重放命中 Host；生成 token ID 和文本与首次请求一致。任一条件失败则总体失败。`report.md` 在失败时也会生成，并列出已取得的证据和原因。
 
 ## 已知限制
 

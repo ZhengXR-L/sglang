@@ -5,8 +5,8 @@ source "$HERE/env.sh"
 OUT=${1:?usage: bash run_test.sh <output_dir>}
 mkdir -p "$OUT"
 OUT=$(cd -- "$OUT" && pwd)
-rm -f "$OUT/layer_first.json" "$OUT/page_first.json" \
-  "$OUT/layer_first.exit_code" "$OUT/page_first.exit_code" "$OUT/report.md"
+rm -f "$OUT/page_first_direct.json" \
+  "$OUT/page_first_direct.exit_code" "$OUT/report.md"
 SERVER_PID=""
 
 cleanup() {
@@ -17,7 +17,7 @@ cleanup() {
   fi
   python3 -u "$HERE/report.py" "$OUT" > "$OUT/report.log" 2>&1
   echo "输出目录: $OUT"
-  for layout in layer_first page_first; do
+  for layout in page_first_direct; do
     echo "  $layout 服务日志: $OUT/server.$layout.log"
     echo "  $layout 评测日志: $OUT/eval.$layout.log"
     echo "  $layout 结果: $OUT/$layout.json"
@@ -30,7 +30,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 overall=0
-for layout in layer_first page_first; do
+for layout in page_first_direct; do
   echo "启动 $layout 服务"
   bash "$HERE/run_server.sh" "$layout" > "$OUT/server.$layout.log" 2>&1 &
   SERVER_PID=$!

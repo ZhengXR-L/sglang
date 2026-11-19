@@ -80,7 +80,7 @@ def token_ids(result):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--layout", choices=("layer_first", "page_first"), required=True)
+    parser.add_argument("--layout", choices=("page_first_direct",), required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
 

@@ -30,13 +30,13 @@ def main(output):
         f"- 模型：`{os.environ['MODEL_PATH']}`",
         f"- NPU 卡号：`{os.environ['NPU_DEVICES']}`；TP：`{os.environ['TP_SIZE']}`",
         f"- 端口：`{os.environ['PORT']}`；Host 内存后端：`{os.environ['SGLANG_HICACHE_HOST_MEM_BACKEND']}`",
-        f"- 每布局请求数：`{int(os.environ['FILLER_REQUESTS']) + 2}`；生成质量/精度：不适用",
+        f"- 请求数：`{int(os.environ['FILLER_REQUESTS']) + 2}`；生成质量/精度：不适用",
         "",
         "| 布局 | 结论 | D2H KV token 增量 | H2D KV token 增量 | Host 命中 token | 输出 token 一致数 | 原因 |",
         "| --- | --- | ---: | ---: | ---: | ---: | --- |",
     ]
     passed = True
-    for layout in ("layer_first", "page_first"):
+    for layout in ("page_first_direct",):
         result_file = output / f"{layout}.json"
         result = json.loads(result_file.read_text(encoding="utf-8")) if result_file.exists() else {}
         code_file = output / f"{layout}.exit_code"
@@ -66,7 +66,7 @@ def main(output):
         "| 用例 | 首次输出 token ID（真值） | 重放输出 token ID（实际） | 是否通过 |",
         "| --- | --- | --- | --- |",
     ]
-    for layout in ("layer_first", "page_first"):
+    for layout in ("page_first_direct",):
         path = output / f"{layout}.json"
         result = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
         lines.append(
