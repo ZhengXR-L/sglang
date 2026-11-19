@@ -573,13 +573,12 @@ class MambaPoolHost(HostKVCache):
             dst_indices = dst_indices.to(
                 dtype=torch.int64, device=device_states[0].device, non_blocking=True
             )
-            for start in range(0, len(device_states), 16):
-                transfer_state_all_layer_direct_lf_pf(
-                    device_states=device_states[start : start + 16],
-                    host_states=host_states[start : start + 16],
-                    device_indices=src_indices,
-                    host_indices=dst_indices,
-                )
+            transfer_state_all_layer_direct_lf_pf(
+                device_states=device_states,
+                host_states=host_states,
+                device_indices=src_indices,
+                host_indices=dst_indices,
+            )
             return
         if MambaPoolHost._slots_are_strided(src_layers[0]):
             # Stage contiguous slots per layer and pass the staging buffer's pointers.
