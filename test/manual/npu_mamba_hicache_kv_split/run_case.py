@@ -85,6 +85,7 @@ def main():
         "target_second": None,
         "match": False,
         "filler_done": 0,
+        "filler_requested": args.num_filler,
         "errors": [],
         "mamba_backup_delta": 0,
         "mamba_load_delta": 0,
@@ -94,7 +95,6 @@ def main():
     load_metric = "sglang:load_back_tokens_total"
     try:
         backup_before = mamba_metric(args.base_url, backup_metric, 10)
-        load_before = mamba_metric(args.base_url, load_metric, 10)
     except Exception as exc:
         result["errors"].append(f"Mamba L2 metrics unavailable: {exc}")
         json.dump(result, open(f"{args.output}/case_result.json", "w"), indent=2)
@@ -138,22 +138,36 @@ def main():
     except Exception as exc:
         result["errors"].append(f"Mamba D2H not observed: {exc}")
 
-    print("[3/3] target replay (host L2 state H2D via kv_exchange) ...", flush=True)
+    print("[3/3] target replay (host L2 state H2D) ...", flush=True)
+    try:
+        load_before = mamba_metric(args.base_url, load_metric, 10)
+    except Exception as exc:
+        result["errors"].append(f"Mamba H2D metric unavailable before replay: {exc}")
+        load_before = None
     try:
         out2, meta2 = generate(
             args.base_url, target_prompt, args.target_new_tokens, args.request_timeout
         )
         result["target_second"] = out2
-        print(f"      completion_tokens={meta2.get('completion_tokens')}", flush=True)
+        details = meta2.get("cached_tokens_details") or {}
+        result["target_replay_host_tokens"] = details.get("host", 0)
+        print(
+            f"      completion_tokens={meta2.get('completion_tokens')}, "
+            f"host_cached_tokens={result['target_replay_host_tokens']}",
+            flush=True,
+        )
+        if result["target_replay_host_tokens"] <= 0:
+            result["errors"].append("target replay did not hit Host L2")
     except Exception as exc:  # noqa: BLE001
         result["errors"].append(f"target replay failed: {exc}")
 
-    try:
-        load_after = await_metric_increase(args.base_url, load_metric, load_before, 30)
-        result["mamba_load_delta"] = load_after - load_before
-        print(f"      mamba H2D tokens={result['mamba_load_delta']}", flush=True)
-    except Exception as exc:
-        result["errors"].append(f"Mamba H2D not observed: {exc}")
+    if load_before is not None:
+        try:
+            load_after = await_metric_increase(args.base_url, load_metric, load_before, 30)
+            result["mamba_load_delta"] = load_after - load_before
+            print(f"      mamba H2D tokens={result['mamba_load_delta']}", flush=True)
+        except Exception as exc:
+            result["errors"].append(f"Mamba H2D not observed: {exc}")
 
     result["match"] = (
         bool(result["target_first"])
@@ -161,10 +175,17 @@ def main():
     )
     json.dump(result, open(f"{args.output}/case_result.json", "w"), indent=2)
 
-    if result["match"] and not result["errors"]:
+    if (
+        result["match"]
+        and not result["errors"]
+        and result["filler_done"] == args.num_filler
+        and result["mamba_backup_delta"] > 0
+        and result["mamba_load_delta"] > 0
+        and result.get("target_replay_host_tokens", 0) > 0
+    ):
         print("PASS: Mamba D2H/H2D observed and replay output identical", flush=True)
         return 0
-    print("FAIL: replay output diverged (or request failed)", flush=True)
+    print("FAIL: Mamba backup/reload or replay check failed", flush=True)
     return 1
 
 

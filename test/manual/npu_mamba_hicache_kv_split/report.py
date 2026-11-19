@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""读取输出目录，汇总 case_result.json 与 server.log 生成 report.md。只汇总，不重新计算判定。"""
+"""读取 case_result.json 并生成 report.md。"""
 
 import argparse
 import json
@@ -35,22 +35,15 @@ def main():
     except Exception:  # noqa: BLE001
         branch = "unknown"
 
-    state_transfer_on = False
-    log_path = os.path.join(out, "server.log")
-    if os.path.exists(log_path):
-        state_transfer_on = (
-            "transfer mode: npu_state_transfer (kv_exchange"
-            in open(log_path, errors="ignore").read()
-        )
-
     passed = bool(
         case
         and case.get("match")
-        and state_transfer_on
         and not case.get("errors")
         and case.get("filler_done", 0) > 0
+        and case.get("filler_done") == case.get("filler_requested")
         and case.get("mamba_backup_delta", 0) > 0
         and case.get("mamba_load_delta", 0) > 0
+        and case.get("target_replay_host_tokens", 0) > 0
     )
 
     lines = []
@@ -64,12 +57,14 @@ def main():
             reasons.append("请求阶段有错误: " + "; ".join(case["errors"]))
         if not case.get("match"):
             reasons.append("target 重放输出与首次不一致（或首次输出为空）")
-        if case.get("filler_done", 0) == 0:
-            reasons.append("filler 请求全部失败，未制造驱逐压力")
-    if not state_transfer_on:
-        reasons.append(
-            "server.log 中未找到 'transfer mode: npu_state_transfer (kv_exchange'，新路径未启用"
-        )
+        if case.get("filler_done", 0) != case.get("filler_requested"):
+            reasons.append("filler 请求未全部完成，驱逐压力不足")
+        if case.get("mamba_backup_delta", 0) <= 0:
+            reasons.append("Mamba D2H 计数未增长")
+        if case.get("mamba_load_delta", 0) <= 0:
+            reasons.append("Mamba H2D 计数未增长")
+        if case.get("target_replay_host_tokens", 0) <= 0:
+            reasons.append("target 重放未命中 Host L2")
     if reasons:
         lines.append("- 失败/警告原因:\n")
         lines.extend(f"  - {r}\n" for r in reasons)
@@ -78,13 +73,14 @@ def main():
     lines.append(f"- 模型: {args.model}\n")
     lines.append(f"- NPU 卡: {args.npu_devices}\n")
     lines.append(f"- 端口: {args.port}\n")
-    lines.append(f"- NPU state transfer 路径启用: {state_transfer_on}\n")
+    lines.append("- IO 后端: kernel_ascend（由 run_server.sh 配置）\n")
     if case:
         lines.append("\n## 指标汇总\n")
         lines.append("| 指标 | 值 |\n| --- | --- |\n")
         lines.append(f"| filler 完成数 | {case.get('filler_done', 0)} |\n")
         lines.append(f"| Mamba D2H tokens 增量 | {case.get('mamba_backup_delta', 0)} |\n")
         lines.append(f"| Mamba H2D tokens 增量 | {case.get('mamba_load_delta', 0)} |\n")
+        lines.append(f"| target 重放 Host 命中 tokens | {case.get('target_replay_host_tokens', 0)} |\n")
         lines.append(f"| 首次输出长度 (chars) | {len(case.get('target_first') or '')} |\n")
         lines.append(f"| 重放输出长度 (chars) | {len(case.get('target_second') or '')} |\n")
         lines.append(f"| 输出一致 | {case.get('match')} |\n")

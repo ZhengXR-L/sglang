@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # 唯一配置入口。按实际环境修改标记为「需修改」的默认值。
 
-export SGLANG_ROOT="${SGLANG_ROOT:-/home/l00889655/sglang/sglang}"
-export KERNEL_ROOT="${KERNEL_ROOT:-/home/l00889655/sglang/sgl-kernel-npu}"
-export MODEL_PATH="${MODEL_PATH:-/mnt/paas/weights/Qwen3.5-4B}"   # hybrid(linear attention) 模型
+export SGLANG_ROOT="${SGLANG_ROOT:-/home/l00889655/sglang/sglang}" # 需修改
+export KERNEL_ROOT="${KERNEL_ROOT:-/home/l00889655/sglang/sgl-kernel-npu}" # 需修改
+export MODEL_PATH="${MODEL_PATH:-/mnt/paas/weights/Qwen3.5-4B}" # 需修改
 
 export NPU_DEVICES="${NPU_DEVICES:-0,1,2,3}"  # 空闲物理卡 ID 列表
 export PORT="${PORT:-30000}"
@@ -21,6 +21,21 @@ export REQUEST_TIMEOUT="${REQUEST_TIMEOUT:-600}"
 export MAX_TOTAL_TOKENS="${MAX_TOTAL_TOKENS:-8192}"
 export CONTEXT_LENGTH="${CONTEXT_LENGTH:-32768}"
 export HICACHE_RATIO="${HICACHE_RATIO:-4}"
+export GSM8K_HICACHE_RATIO="${GSM8K_HICACHE_RATIO:-8}"
+
+# GSM8K 精度与逐题 Host 回迁用例
+export GSM8K_TRAIN_PATH="${GSM8K_TRAIN_PATH:-}" # 需填写 train.jsonl
+export GSM8K_TEST_PATH="${GSM8K_TEST_PATH:-}" # 需填写 test.jsonl
+export GSM8K_NUM_QUESTIONS="${GSM8K_NUM_QUESTIONS:-200}"
+export GSM8K_NUM_SHOTS="${GSM8K_NUM_SHOTS:-8}"
+export GSM8K_MAX_NEW_TOKENS="${GSM8K_MAX_NEW_TOKENS:-512}"
+export GSM8K_ACCURACY="${GSM8K_ACCURACY:-}"
+export TEST_CASE="${TEST_CASE:-gsm8k}"
+export UNIQUE_PAD_TOKENS="${UNIQUE_PAD_TOKENS:-640}"
+export PAGE_SIZE="${PAGE_SIZE:-128}"
+export FILLER_PROMPT_TOKENS="${FILLER_PROMPT_TOKENS:-4096}"
+export MAX_FILLER_REQUESTS="${MAX_FILLER_REQUESTS:-12}"
+export GLOBAL_FILLER_CAP="${GLOBAL_FILLER_CAP:-0}"
 
 # Ascend 运行环境；set_env.sh 会引用未定义变量，source 期间临时关闭 -u。
 set +u
@@ -31,7 +46,6 @@ export ASCEND_RT_VISIBLE_DEVICES="$NPU_DEVICES"
 export SGLANG_HICACHE_HOST_MEM_BACKEND="${SGLANG_HICACHE_HOST_MEM_BACKEND:-acl}"
 export PYTORCH_NPU_ALLOC_CONF="${PYTORCH_NPU_ALLOC_CONF:-expandable_segments:True}"
 export HCCL_BUFFSIZE="${HCCL_BUFFSIZE:-2048}"
-# Use the packaged build that registers both kv_exchange and
-# sgl_chunk_gated_delta_rule. Override this path for an installed wheel.
+# 使用包含 state direct 传输及模型算子的构建包；安装 wheel 时可覆盖。
 export KERNEL_PYTHON_PATH="${KERNEL_PYTHON_PATH:-$KERNEL_ROOT/build/torch/package}"
 export PYTHONPATH="$SGLANG_ROOT/python:$KERNEL_PYTHON_PATH${PYTHONPATH:+:$PYTHONPATH}"

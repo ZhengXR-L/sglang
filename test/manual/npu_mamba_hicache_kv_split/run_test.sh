@@ -10,7 +10,8 @@ trap 'kill -TERM "${SERVER_PID:-}" 2>/dev/null || true
 echo "输出目录: $OUT"
 echo "  服务日志: $OUT/server.log"
 echo "  评测日志: $OUT/eval.log"
-echo "  测试报告: $OUT/report.md"' EXIT
+echo "  测试报告: $OUT/report.md"
+echo "  报告日志: $OUT/report.log"' EXIT
 
 bash "$HERE/run_server.sh" > "$OUT/server.log" 2>&1 &
 SERVER_PID=$!

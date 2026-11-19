@@ -85,8 +85,8 @@ checkpoint 深度，boundary 为全部 prompt 公共前缀按页对齐的深度�
 8192 个设备 token（刻意调小以制造驱逐）、8 倍 Host 容量、128 token 页、
 每个 filler 4096 token；filler 预算为每题上限 `MAX_FILLER_REQUESTS`（默认 12，
 stress 用例每题实际用约 2 个）加全场总量上限 `GLOBAL_FILLER_CAP`（0 为不限）。
-可通过环境变量覆盖。若部署环境需要私有 `kv_exchange` 包，按下文“实测环境”
-的桥接方法先设置算子注册。
+可通过环境变量覆盖。当前版本需要包含 `transfer_state_*_direct_*`
+及模型前向算子的 `sgl-kernel-npu` 构建包。
 
 旧版 `/tmp/mamba_gsm8k_5_v8` 的 5/5 Host 命中仅表示 `host>0`，不能
 视为 5/5 独有状态回迁。151 上题间 flush 的 3 题试跑
@@ -106,7 +106,7 @@ stress 用例每题实际用约 2 个）加全场总量上限 `GLOBAL_FILLER_CAP
 
 ## 测试目的
 
-验证 `python/sglang/srt/mem_cache/pool_host/mamba.py` 的改动：`kernel_ascend` IO 后端下，Mamba 状态的 H2D/D2H 传输走 `kv_exchange`，Python 封装分别调用 `transfer_kv_per_layer_kv_split_pf_lf` / `transfer_kv_all_layer_kv_split_lf_pf`。这里复用算子接口传输独立的 temporal、conv、draft 和 side state，Mamba Host Pool 仍为 `page_first_direct`，不是 K/V 分离布局。预期现象：驱逐压力下状态正确备份到 Host 并回读，同一 prompt 两次 greedy 生成输出完全一致，服务无崩溃。
+验证 `python/sglang/srt/mem_cache/pool_host/mamba.py` 的改动：`kernel_ascend` IO 后端下，temporal 和 conv 状态的 H2D/D2H 分别调用 `transfer_state_per_layer_direct_pf_lf` / `transfer_state_all_layer_direct_lf_pf`。draft 的独立层也通过这两个 state direct 算子搬运；额外的 slot side state 仍使用 PyTorch `index_select` / `index_copy_`。Mamba Host Pool 使用 `page_first_direct` 布局。预期现象：驱逐压力下状态正确备份到 Host 并回读，同一 prompt 两次 greedy 生成输出完全一致，服务无崩溃。
 
 ## 测试原理
 
@@ -117,15 +117,15 @@ mamba 池按 request 存槽：一个请求只占一个状态槽，槽在请求�
 3. 重放同一 target prompt：device 前缀缓存已逐出、命中 host L2，mamba 状态经 H2D 恢复后续写；
 4. 从 `/metrics` 读取 `pool="mamba"` 的 D2H、H2D token 计数，分别要求 filler 后和 target 重放后增长；两次输出还须逐字符一致。报告中的计数增量为所有 TP rank 之和。
 
-同时从 server.log 断言 `transfer mode: npu_state_transfer (kv_exchange` 日志行存在，确认新路径被启用。
+`run_server.sh` 固定使用 `--hicache-io-backend kernel_ascend`。当前 Mamba 代码不再打印旧版 `npu_state_transfer (kv_exchange)` 日志；运行时通过 Host 命中、Mamba D2H/H2D 计数与输出一致性判定端到端路径，结合报告中的源码提交号核对具体算子调用。
 
 ## 前置依赖
 
 - 昇腾 NPU（A3/A5），CANN 版本与日常 sglang NPU 开发环境一致
-- sgl-kernel-npu：包含 `operators/mem_cache/memfabric/kv_transfer` 模块（提供四个 split-KV 算子）
+- sgl-kernel-npu：包含 `operators/data_move/transfer_state_direct.py` 及模型前向所需算子，并已为目标 NPU 编译安装
 - sglang：本仓库该改动之后的工作区
 - 模型：任一 hybrid（linear attention / mamba 结构）模型，如 Qwen3-Next 系列或 Falcon-H1 系列，需已下载到本地
-- host 内存需容纳 `MAX_TOTAL_TOKENS × HICACHE_RATIO` 的层级缓存
+- host 内存需容纳由设备容量与 Host 容量比决定的层级缓存；GSM8K 用 `GSM8K_HICACHE_RATIO`，基础冒烟用 `HICACHE_RATIO`
 
 ## 环境变量
 
@@ -133,7 +133,7 @@ mamba 池按 request 存槽：一个请求只占一个状态槽，槽在请求�
 | --- | --- | --- | --- |
 | SGLANG_ROOT | /root/sglang | sglang 仓库路径 | 是 |
 | KERNEL_ROOT | /root/sgl-kernel-npu | sgl-kernel-npu 仓库路径 | 是 |
-| KERNEL_PYTHON_PATH | `$KERNEL_ROOT/build/torch/package` | 同时注册 `kv_exchange` 与 `sgl_chunk_gated_delta_rule` 的构建包目录；安装 wheel 时可覆盖 | 否 |
+| KERNEL_PYTHON_PATH | `$KERNEL_ROOT/build/torch/package` | 包含 state direct 传输与模型算子的构建包目录；安装 wheel 时可覆盖 | 否 |
 | MODEL_PATH | /data/models/Qwen3-Next-80B | hybrid(mamba) 模型路径 | 是 |
 | NPU_DEVICES | 0,1 | 空闲物理卡 ID 列表，卡数决定 tp-size | 是 |
 | PORT | 30000 | 服务端口 | 否 |
@@ -147,12 +147,18 @@ mamba 池按 request 存槽：一个请求只占一个状态槽，槽在请求�
 | MAX_TOTAL_TOKENS | 8192 | device KV 池容量（刻意调小制造驱逐） | 否 |
 | CONTEXT_LENGTH | 32768 | 模型上下文长度 | 否 |
 | HICACHE_RATIO | 4 | host 池 / device 池容量比 | 否 |
+| GSM8K_HICACHE_RATIO | 8 | GSM8K / stress 用例的 Host 容量比 | 否 |
+| GSM8K_TRAIN_PATH、GSM8K_TEST_PATH | `/path/to/gsm8k/{train,test}.jsonl` | GSM8K 数据集路径，仅 `run_gsm8k.sh` 必填 | GSM8K 必填 |
+| GSM8K_NUM_QUESTIONS、GSM8K_NUM_SHOTS、GSM8K_MAX_NEW_TOKENS | 200、8、512 | 题数、few-shot 数、生成上限 | 否 |
+| GSM8K_ACCURACY、TEST_CASE | 空、gsm8k | 同配置精度门限、用例选择（gsm8k/stress） | 否 |
+| UNIQUE_PAD_TOKENS、PAGE_SIZE | 640、128 | stress 独有填充、KV 页大小 | 否 |
+| FILLER_PROMPT_TOKENS、MAX_FILLER_REQUESTS、GLOBAL_FILLER_CAP | 4096、12、0 | 驱逐请求长度、单题/全场上限 | 否 |
 | SGLANG_HICACHE_HOST_MEM_BACKEND | acl | host 内存后端（acl 或 memfabric；本分支 hybrid 模型 MHA 池未做 memfabric 预留，实测用 acl） | 否 |
 
 151 上的 100 题用例使用 `build/torch/package`。旧的
 `python/sgl_kernel_npu/build/lib.linux-aarch64-cpython-312` 在该机器上
-只有旧 GDN 算子，缺少 `kv_exchange` 与 `sgl_chunk_gated_delta_rule`，
-不能用于当前用例。下述私有算子桥接是此前单请求测试的历史环境记录。
+只有旧 GDN 算子，缺少当前 Mamba 所需的 state direct 算子和完整 GDN 算子，
+不能用于当前用例。下述私有 `kv_exchange` 桥接仅是旧版本的历史记录，当前版本无需使用。
 
 ## 在另一台 A5 上运行
 
@@ -164,7 +170,7 @@ mamba 池按 request 存槽：一个请求只占一个状态槽，槽在请求�
   其中 24 层 linear attention、8 层 full attention，`hidden_size=2560`。
   train/test 数据须为包含 `question` 和 `answer` 的 GSM8K JSONL 文件。
 - A5 使用架构版本 `3510` 编译 sgl-kernel-npu。当前代码除
-  `kv_exchange` 外还调用 GDN、causal conv 等算子；没有适配好的完整 A5
+  state direct 传输外还调用 GDN、causal conv 等算子；没有适配好的完整 A5
   wheel 时，使用仓库根目录的构建入口编译所有支持 A5 的算子：
 
   ```bash
@@ -174,7 +180,8 @@ mamba 池按 request 存槽：一个请求只占一个状态槽，槽在请求�
   ```
 
   构建参数见 [sgl-kernel-npu 构建说明](https://github.com/sgl-project/sgl-kernel-npu/blob/main/python/sgl_kernel_npu/README.md)，
-  `kv_exchange` 的 A5 要求见 [算子说明](https://github.com/sgl-project/sgl-kernel-npu/blob/main/docs/api/en/operators/mem_cache/kv_transfer.md)。
+  编译产物须包含 `transfer_state_per_layer_direct_pf_lf`、
+  `transfer_state_all_layer_direct_lf_pf` 及模型所需前向算子。
   151 上的 A3 编译产物不能直接复用。CANN、PyTorch 和 torch_npu 应与
   A5 构建包匹配。若已安装 A5 wheel，可将 `KERNEL_PYTHON_PATH` 设为实际
   `sgl_kernel_npu` 包的父目录；谨防旧的 `build/torch/package` 抢先于 wheel 被导入。
@@ -204,14 +211,13 @@ import torch
 import sgl_kernel_npu
 
 print(sgl_kernel_npu.__file__)
-for name in (
-    "kv_exchange",
-    "sgl_chunk_gated_delta_rule",
-    "causal_conv1d",
-    "recurrent_gated_delta_rule",
-):
-    assert hasattr(torch.ops.npu, name), f"缺少算子: {name}"
-print("算子注册检查通过")
+from sgl_kernel_npu.operators.data_move import (
+    transfer_state_all_layer_direct_lf_pf,
+    transfer_state_per_layer_direct_pf_lf,
+)
+for name in ("sgl_chunk_gated_delta_rule", "causal_conv1d", "recurrent_gated_delta_rule"):
+    print(f"{name} 启动前已注册:", hasattr(torch.ops.npu, name))
+print("state direct 接口导入通过；模型前向算子以实际请求验证")
 PY
 ```
 
@@ -239,13 +245,13 @@ TEST_CASE=stress GSM8K_NUM_QUESTIONS=100 \
 若重点是独有 Mamba 状态回迁，以 `TEST_CASE=stress` 的结果为准。
 `run_gsm8k.sh` 输出 `server.log`、`eval.log`、`result.json`。
 检查 `result.json` 的 `passed`、`unique_host_questions`、
-`device_hit_questions`，以及服务日志中的
-`NPU HiCache Mamba state transfer mode: npu_state_transfer (kv_exchange`。A5 的 Host 深度不必等于
+`device_hit_questions`。旧版服务日志中的 `npu_state_transfer (kv_exchange)`
+标记在当前代码中已不存在。A5 的 Host 深度不必等于
 151 的 5376/5632；stress 真正要求每题 `host >= seed_len > shared_prefix_boundary`、
 `device=0`、Mamba H2D 增长且数值答案与首轮一致。
 
 `run_gsm8k.sh` 默认 `PAGE_SIZE=128`、`MAX_TOTAL_TOKENS=8192`、
-`HICACHE_RATIO=8`。151 的 TP=4 运行曾为 Mamba Host 池分配约 176 GB/进程；
+`GSM8K_HICACHE_RATIO=8`。151 的 TP=4 运行曾为 Mamba Host 池分配约 176 GB/进程；
 A5 上以实际启动日志和 Host/cgroup 余量为准。不要直接把 page size 改成 1；
 此前同模型该设置导致首轮答案异常。若调整容量或唯一填充长度，需保证
 完整 prompt 加生成 token 能放入设备容量，并重新确认驱逐和 seed checkpoint
@@ -317,7 +323,7 @@ sglang serve \
 
 1. target 两次 greedy 输出完全一致（`case_result.json` 的 `match == true`）；
 2. filler 全部成功（`filler_done == NUM_FILLER`），驱逐压力真实形成；
-3. server.log 中存在 `transfer mode: npu_state_transfer (kv_exchange`，确认新路径启用；
+3. target 重放的 `cached_tokens_details.host > 0`，确认命中 Host L2；
 4. 无请求阶段错误。
 5. `pool="mamba"` 的 D2H/H2D token 计数增量均大于 0。
 
@@ -326,6 +332,7 @@ sglang serve \
 ## 已知限制
 
 - 通过 Mamba 池计数器断言发生了 L2 备份和回读；计数器不记录具体算子调用次数。
+- 默认 Qwen3.5-4B 用例覆盖主状态；draft 与额外 slot side state 需要对应模型或单独的组件测试。
 - 只做正确性判定，不做性能评价。
 - 只覆盖 greedy 单并发串行场景，不覆盖 PD 分离、多 rank TP>1 下的传输正确性。
 - draft（MTP）层是否被包含取决于所选模型是否启用 speculative decoding，本用例不强制。
