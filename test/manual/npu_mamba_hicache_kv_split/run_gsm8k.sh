@@ -3,7 +3,6 @@ set -euo pipefail
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
 source "$HERE/env.sh"
-TP_SIZE="$(awk -F, '{print NF}' <<< "$NPU_DEVICES")"
 : "${GSM8K_TRAIN_PATH:?set GSM8K_TRAIN_PATH to train.jsonl}"
 : "${GSM8K_TEST_PATH:?set GSM8K_TEST_PATH to test.jsonl}"
 

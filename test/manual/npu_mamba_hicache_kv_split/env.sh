@@ -6,6 +6,7 @@ export KERNEL_ROOT="${KERNEL_ROOT:-/home/l00889655/sglang/sgl-kernel-npu}" # 需
 export MODEL_PATH="${MODEL_PATH:-/mnt/paas/weights/Qwen3.5-4B}" # 需修改
 
 export NPU_DEVICES="${NPU_DEVICES:-0,1,2,3}"  # 空闲物理卡 ID 列表
+export TP_SIZE="$(awk -F, '{print NF}' <<< "$NPU_DEVICES")"
 export PORT="${PORT:-30000}"
 
 # 驱逐压力参数：target 请求驱逐后重放，filler 请求占满 device mamba slot
@@ -43,9 +44,7 @@ source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh
 set -u
 export ASCEND_RT_VISIBLE_DEVICES="$NPU_DEVICES"
 
-export SGLANG_HICACHE_HOST_MEM_BACKEND="${SGLANG_HICACHE_HOST_MEM_BACKEND:-acl}"
 export PYTORCH_NPU_ALLOC_CONF="${PYTORCH_NPU_ALLOC_CONF:-expandable_segments:True}"
 export HCCL_BUFFSIZE="${HCCL_BUFFSIZE:-2048}"
 # 使用包含 state direct 传输及模型算子的构建包；安装 wheel 时可覆盖。
-export KERNEL_PYTHON_PATH="${KERNEL_PYTHON_PATH:-$KERNEL_ROOT/build/torch/package}"
-export PYTHONPATH="$SGLANG_ROOT/python:$KERNEL_PYTHON_PATH${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="$SGLANG_ROOT/python${PYTHONPATH:+:$PYTHONPATH}"
