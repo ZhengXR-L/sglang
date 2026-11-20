@@ -148,7 +148,6 @@ def main():
         "num_shots": shots,
         "accuracy_threshold": threshold,
         "sglang_commit": git_commit(os.environ["SGLANG_ROOT"]),
-        "kernel_commit": git_commit(os.environ["KERNEL_ROOT"]),
         "npu_devices": os.environ["NPU_DEVICES"],
         "tp_size": int(os.environ["TP_SIZE"]),
         "rounds": {"first": [], "filler": [], "replay": []},

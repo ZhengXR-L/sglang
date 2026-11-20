@@ -2,10 +2,10 @@
 # 唯一配置入口。按实际环境修改标记为「需修改」的默认值。
 
 export SGLANG_ROOT="${SGLANG_ROOT:-/home/l00889655/sglang/sglang}" # 需修改
-export KERNEL_ROOT="${KERNEL_ROOT:-/home/l00889655/sglang/sgl-kernel-npu}" # 需修改
+# export KERNEL_ROOT="${KERNEL_ROOT:-/home/l00889655/sglang/sgl-kernel-npu}" # 需修改
 export MODEL_PATH="${MODEL_PATH:-/mnt/paas/weights/Qwen3.5-4B}" # 需修改
 
-export NPU_DEVICES="${NPU_DEVICES:-0,1,2,3}"  # 空闲物理卡 ID 列表
+export NPU_DEVICES="${NPU_DEVICES:-9}"  # 空闲物理卡 ID 列表
 export TP_SIZE="$(awk -F, '{print NF}' <<< "$NPU_DEVICES")"
 export PORT="${PORT:-30000}"
 
@@ -25,8 +25,8 @@ export HICACHE_RATIO="${HICACHE_RATIO:-4}"
 export GSM8K_HICACHE_RATIO="${GSM8K_HICACHE_RATIO:-8}"
 
 # GSM8K 精度与逐题 Host 回迁用例
-export GSM8K_TRAIN_PATH="${GSM8K_TRAIN_PATH:-}" # 需填写 train.jsonl
-export GSM8K_TEST_PATH="${GSM8K_TEST_PATH:-}" # 需填写 test.jsonl
+export GSM8K_TRAIN_PATH="${GSM8K_TRAIN_PATH:-/home/l00889655/sglang/gsm8k_train.jsonl}" # 需填写 train.jsonl
+export GSM8K_TEST_PATH="${GSM8K_TEST_PATH:-/home/l00889655/sglang/gsm8k_test.jsonl}" # 需填写 test.jsonl
 export GSM8K_NUM_QUESTIONS="${GSM8K_NUM_QUESTIONS:-200}"
 export GSM8K_NUM_SHOTS="${GSM8K_NUM_SHOTS:-8}"
 export GSM8K_MAX_NEW_TOKENS="${GSM8K_MAX_NEW_TOKENS:-512}"

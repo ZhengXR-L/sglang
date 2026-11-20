@@ -132,8 +132,6 @@ mamba 池按 request 存槽：一个请求只占一个状态槽，槽在请求�
 | 变量 | 示例值 | 含义 | 必填 |
 | --- | --- | --- | --- |
 | SGLANG_ROOT | /root/sglang | sglang 仓库路径 | 是 |
-| KERNEL_ROOT | /root/sgl-kernel-npu | sgl-kernel-npu 仓库路径 | 是 |
-| KERNEL_PYTHON_PATH | `$KERNEL_ROOT/build/torch/package` | 包含 state direct 传输与模型算子的构建包目录；安装 wheel 时可覆盖 | 否 |
 | MODEL_PATH | /data/models/Qwen3-Next-80B | hybrid(mamba) 模型路径 | 是 |
 | NPU_DEVICES | 0,1 | 空闲物理卡 ID 列表，卡数决定 tp-size | 是 |
 | PORT | 30000 | 服务端口 | 否 |
@@ -196,8 +194,6 @@ mamba 池按 request 存槽：一个请求只占一个状态槽，槽在请求�
 
 ```bash
 export SGLANG_ROOT=/path/to/sglang
-export KERNEL_ROOT=/path/to/sgl-kernel-npu
-export KERNEL_PYTHON_PATH="$KERNEL_ROOT/build/torch/package"
 export MODEL_PATH=/path/to/Qwen3.5-4B
 export GSM8K_TRAIN_PATH=/path/to/gsm8k_train.jsonl
 export GSM8K_TEST_PATH=/path/to/gsm8k_test.jsonl
