@@ -44,6 +44,7 @@ from sglang.srt.mem_cache.pool_host.mha import (
 from sglang.srt.mem_cache.pool_host.mla import MLATokenToKVPoolHost
 from sglang.srt.mem_cache.pool_host.npu_host_memory import (
     reserve_dsv4_paged_host_memory,
+    reserve_npu_hybrid_host_memory,
 )
 from sglang.srt.mem_cache.pool_host.page_interleave import (
     PageInterleaveHostPool,
@@ -2622,6 +2623,8 @@ def attach_hybrid_pool_to_unified_cache(
         else:
             components = set(cache.components.keys())
             strategy = _select_strategy(kvcache, components)
+            if not isinstance(strategy, _DeepSeekV4Strategy):
+                reserve_npu_hybrid_host_memory(kvcache, params)
             result = strategy.build(
                 cache=cache,
                 kvcache=kvcache,

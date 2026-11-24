@@ -321,6 +321,69 @@ def get_host_memory_backend() -> NpuHostMemoryBackend | None:
     return _backend
 
 
+def reserve_npu_hybrid_host_memory(kvcache, params) -> None:
+    """Reserve device-sized NPU pools with a per-pool MemFabric margin."""
+    if not is_npu() or not memfabric_host_memory_enabled():
+        return
+
+    from sglang.srt.mem_cache.device_pool_info import IndexKeyBufferInfo
+
+    memory = get_memory()
+    seen = set()
+    device_bytes = 0
+    sidecar_bytes = 0
+    pool_count = 0
+
+    def add_pool(pool) -> None:
+        nonlocal device_bytes, sidecar_bytes, pool_count
+        if pool is None or id(pool) in seen:
+            return
+        seen.add(id(pool))
+        pool_count += 1
+        size = pool.get_kv_size_bytes()
+        device_bytes += sum(size) if isinstance(size, tuple) else size
+        for info in pool.get_device_pool_infos():
+            if isinstance(info.buffer_info, IndexKeyBufferInfo):
+                sidecar_bytes += sum(
+                    buffer.nbytes for buffer in info.buffer_info.buffers
+                )
+
+    add_pool(getattr(kvcache, "full_kv_pool", None) or kvcache)
+    add_pool(getattr(kvcache, "swa_kv_pool", None))
+    add_pool(getattr(getattr(params.token_to_kv_pool_allocator, "state", None), "pool", None))
+    # A wrapper can expose index sidecars beside its full KV child.
+    if getattr(kvcache, "full_kv_pool", None) is not None:
+        for info in kvcache.get_device_pool_infos():
+            if isinstance(info.buffer_info, IndexKeyBufferInfo):
+                sidecar_bytes += sum(
+                    buffer.nbytes for buffer in info.buffer_info.buffers
+                )
+                pool_count += 1
+    for draft in params.mtp_draft_device_pools:
+        add_pool(getattr(draft, "full_kv_pool", None) or draft)
+        add_pool(getattr(draft, "swa_kv_pool", None))
+    for draft in params.mtp_draft_mamba_pools:
+        add_pool(draft)
+    for draft in params.sidecar_draft_device_pools:
+        add_pool(draft)
+
+    source_bytes = (
+        memory.hicache_size * 1e9
+        if memory.hicache_size > 0
+        else (device_bytes + sidecar_bytes) * memory.hicache_ratio
+    )
+    reserve_bytes = math.ceil(source_bytes) + pool_count * 64 * 1024 * 1024
+    logger.info(
+        "[HiCache] reserving MemFabric from NPU device pools: "
+        "device=%.2fGB sidecars=%.2fGB pools=%d reserve=%.2fGB",
+        device_bytes / _MEMFABRIC_GB,
+        sidecar_bytes / _MEMFABRIC_GB,
+        pool_count,
+        reserve_bytes / _MEMFABRIC_GB,
+    )
+    get_host_memory_backend().ensure_capacity(reserve_bytes, torch.npu.current_device())
+
+
 def reserve_mla_split_host_memory(
     *,
     num_pages: int,
