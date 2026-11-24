@@ -322,24 +322,117 @@ def get_host_memory_backend() -> NpuHostMemoryBackend | None:
 
 
 def reserve_npu_hybrid_host_memory(kvcache, params) -> None:
-    """Reserve device-sized NPU pools with a per-pool MemFabric margin."""
+    """Reserve NPU host pools before MemFabric fixes its capacity."""
     if not is_npu() or not memfabric_host_memory_enabled():
         return
 
-    from sglang.srt.mem_cache.device_pool_info import IndexKeyBufferInfo
+    from sglang.srt.mem_cache.device_pool_info import (
+        IndexKeyBufferInfo,
+        KVScaleLayout,
+        MHABufferInfo,
+        MLABufferInfo,
+        MLASplitBuffers,
+        MambaStateBufferInfo,
+    )
+    from sglang.srt.runtime_context import get_parallel
 
     memory = get_memory()
     seen = set()
     device_bytes = 0
     sidecar_bytes = 0
     pool_count = 0
+    host_padding_bytes = 0
+
+    def host_page_bytes(pool) -> int:
+        """One physical Host page for this pool's checkpoint buffers.
+
+        Packed draft layers are visited separately and contribute their row
+        bytes to the target Host page. Mamba's page is one checkpoint slot.
+        """
+        page_size = params.page_size
+        for info in pool.get_device_pool_infos():
+            buffer_info = info.buffer_info
+            if isinstance(buffer_info, MHABufferInfo):
+                total = (
+                    page_size
+                    * len(buffer_info.buffers.k)
+                    * buffer_info.head_num
+                    * (buffer_info.head_dim + buffer_info.v_head_dim)
+                    * buffer_info.dtype.itemsize
+                )
+                scales = buffer_info.scales
+                if scales is not None:
+                    if scales.layout is KVScaleLayout.MXFP8_INTERLEAVED:
+                        total += len(scales.k) * (
+                            scales.k[0][0].nbytes + scales.v[0][0].nbytes
+                        )
+                    elif (
+                        scales.layout
+                        is KVScaleLayout.MXFP8_MODELSLIM_K_DYNAMIC_V_PER_CHANNEL
+                    ):
+                        total += (
+                            page_size
+                            * len(scales.k)
+                            * buffer_info.head_num
+                            * (buffer_info.head_dim // 32)
+                        )
+                return total
+            if isinstance(buffer_info, MLABufferInfo):
+                parallel = get_parallel()
+                if parallel.dcp_enabled:
+                    page_size //= parallel.attn_dcp_size
+                layers = len(buffer_info.layer_indices)
+                native = buffer_info.buffers
+                if not isinstance(native, MLASplitBuffers):
+                    return (
+                        page_size
+                        * pool.kv_cache_dim
+                        * buffer_info.dtype.itemsize
+                        * layers
+                    )
+                k_width = (
+                    native.k_width
+                    if buffer_info.packed_fp8
+                    else buffer_info.kv_lora_rank
+                )
+                v_width = 0 if buffer_info.packed_fp8 else native.v_width
+                v_dtype = (
+                    native.v.dtype
+                    if v_width and native.v is not None
+                    else buffer_info.dtype
+                )
+                total = page_size * layers * (
+                    k_width * buffer_info.dtype.itemsize + v_width * v_dtype.itemsize
+                )
+                index_rows = (
+                    native.index_k.shape[2]
+                    if native.index_k is not None
+                    else page_size
+                ) * len(native.index_layer_indices)
+                if native.index_k is not None:
+                    total += (
+                        index_rows * native.index_width * buffer_info.dtype.itemsize
+                    )
+                if native.index_scales is not None:
+                    total += index_rows * 4
+                return total
+            if isinstance(buffer_info, MambaStateBufferInfo):
+                return sum(
+                    tensor[:, 0].nbytes
+                    for tensor in (buffer_info.temporal, *buffer_info.conv)
+                ) + sum(
+                    tensor[0].nbytes for tensor in buffer_info.extra_checkpoint_buffers
+                )
+        return 0
 
     def add_pool(pool) -> None:
-        nonlocal device_bytes, sidecar_bytes, pool_count
+        nonlocal device_bytes, sidecar_bytes, pool_count, host_padding_bytes
         if pool is None or id(pool) in seen:
             return
         seen.add(id(pool))
         pool_count += 1
+        if memory.hicache_size > 0:
+            host_padding_bytes += host_page_bytes(pool)
         size = pool.get_kv_size_bytes()
         device_bytes += sum(size) if isinstance(size, tuple) else size
         for info in pool.get_device_pool_infos():
@@ -372,13 +465,18 @@ def reserve_npu_hybrid_host_memory(kvcache, params) -> None:
         if memory.hicache_size > 0
         else (device_bytes + sidecar_bytes) * memory.hicache_ratio
     )
-    reserve_bytes = math.ceil(source_bytes) + pool_count * 64 * 1024 * 1024
+    reserve_bytes = (
+        math.ceil(source_bytes)
+        + host_padding_bytes
+        + pool_count * 64 * 1024 * 1024
+    )
     logger.info(
         "[HiCache] reserving MemFabric from NPU device pools: "
-        "device=%.2fGB sidecars=%.2fGB pools=%d reserve=%.2fGB",
+        "device=%.2fGB sidecars=%.2fGB pools=%d host_padding=%.2fGB reserve=%.2fGB",
         device_bytes / _MEMFABRIC_GB,
         sidecar_bytes / _MEMFABRIC_GB,
         pool_count,
+        host_padding_bytes / _MEMFABRIC_GB,
         reserve_bytes / _MEMFABRIC_GB,
     )
     get_host_memory_backend().ensure_capacity(reserve_bytes, torch.npu.current_device())
