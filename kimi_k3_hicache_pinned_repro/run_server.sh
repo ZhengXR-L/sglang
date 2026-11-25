@@ -2,13 +2,20 @@
 set -euo pipefail
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 source "$HERE/env.sh"
-python3 -u "$HERE/prepare_model.py"
+if [[ "$MODEL_PATH" == "$PRIVATE_MODEL" ]]; then
+  python3 -u "$HERE/prepare_model.py"
+fi
+
+QUANT_ARGS=()
+if [[ "$QUANTIZATION" != "none" ]]; then
+  QUANT_ARGS=(--quantization "$QUANTIZATION")
+fi
 
 sglang serve \
-  --model-path "$PRIVATE_MODEL" \
+  --model-path "$MODEL_PATH" \
   --host 127.0.0.1 --port "$PORT" --trust-remote-code \
   --device npu --attention-backend ascend --dtype bfloat16 \
-  --quantization "$QUANTIZATION" --tp-size "$TP_SIZE" \
+  "${QUANT_ARGS[@]}" --tp-size "$TP_SIZE" \
   --mem-fraction-static "$MEM_FRACTION_STATIC" \
   --max-mamba-cache-size "$MAX_MAMBA_CACHE_SIZE" \
   --enable-hierarchical-cache --hicache-io-backend kernel_ascend \

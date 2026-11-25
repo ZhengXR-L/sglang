@@ -25,9 +25,10 @@ RuntimeError: host buffer must use pinned memory
 
 | 变量 | 示例或默认值 | 含义 | 必填 |
 | --- | --- | --- | --- |
+| `MODEL_PATH` | 私有目录 | 实际模型路径，另设 Kimi Linear 路径时跳过减层准备 | 否 |
 | `SOURCE_MODEL` | `/mnt/paas/weights/Kimi-K3-w4a8` | 公共 ModelSlim W4A8 checkpoint | 是 |
 | `PRIVATE_MODEL` | `/home/l00889655/kimi_truncation` | 私有五层目录，缺失时自动创建 | 否 |
-| `SGLANG_ROOT` | `/sgl-workspace/sglang` | 容器里的 SGLang checkout | 是 |
+| `SGLANG_ROOT` | 脚本所在仓库 | 容器里的 SGLang checkout | 是 |
 | `ASCEND_ENV` | `/usr/local/Ascend/ascend-toolkit/latest/set_env.sh` | CANN 环境脚本 | 是 |
 | `NPU_DEVICES` | `0,1,2,3,4,5,6,7` | 可见卡列表，列表长度作为本机 TP 默认值 | 是 |
 | `PORT` | `30000` | 本机服务端口 | 否 |
@@ -64,13 +65,22 @@ bash run_test.sh ./out/kimi-k3-pinned
 需要单独启动服务时，在复现目录运行：
 
 ```bash
+HERE=$(pwd)
 source ./env.sh
-python3 -u ./prepare_model.py
+if [[ "$MODEL_PATH" == "$PRIVATE_MODEL" ]]; then
+  python3 -u "$HERE/prepare_model.py"
+fi
+
+QUANT_ARGS=()
+if [[ "$QUANTIZATION" != "none" ]]; then
+  QUANT_ARGS=(--quantization "$QUANTIZATION")
+fi
+
 sglang serve \
-  --model-path "$PRIVATE_MODEL" \
+  --model-path "$MODEL_PATH" \
   --host 127.0.0.1 --port "$PORT" --trust-remote-code \
   --device npu --attention-backend ascend --dtype bfloat16 \
-  --quantization "$QUANTIZATION" --tp-size "$TP_SIZE" \
+  "${QUANT_ARGS[@]}" --tp-size "$TP_SIZE" \
   --mem-fraction-static "$MEM_FRACTION_STATIC" \
   --max-mamba-cache-size "$MAX_MAMBA_CACHE_SIZE" \
   --enable-hierarchical-cache --hicache-io-backend kernel_ascend \
@@ -100,3 +110,5 @@ sglang serve \
 - 异常是否出现取决于实际 allocator、CANN / torch_npu / kernel 版本和缓存路径。请求完成只代表本轮没有观察到目标报错，无法单独确认 Mamba 写回实际发生。需要确认时，可在容器的算子调用前记录目标张量的 `dst.is_pinned()`。
 - 私有模型复用原分片和权重索引，加载器仍可能读取完整分片。
 - 本用例使用串行文本请求，覆盖执行路径和同一异常的复现，不测精度、吞吐或所有 rank。
+
+完整 Kimi Linear 可用 MODEL_PATH=/mnt/paas/weights/Kimi-Linear-48B-A3B-Instruct QUANTIZATION=none 运行。调用日志记录 MAMBA_SOURCE、MAMBA_OP_BEGIN、MAMBA_OP_OK。空的 host backend 会取消导出，让模型的 setdefault 生效。
