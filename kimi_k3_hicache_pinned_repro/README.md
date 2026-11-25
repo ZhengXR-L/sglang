@@ -26,6 +26,9 @@ RuntimeError: host buffer must use pinned memory
 | 变量 | 示例或默认值 | 含义 | 必填 |
 | --- | --- | --- | --- |
 | `MODEL_PATH` | 私有目录 | 实际模型路径，另设 Kimi Linear 路径时跳过减层准备 | 否 |
+| `CONTEXT_LENGTH` | `4096` | 上下文上限 | 否 |
+| `MAX_TOTAL_TOKENS` | `4096` | token pool 上限 | 否 |
+| `MAX_RUNNING_REQUESTS` | `2` | 最大并发请求 | 否 |
 | `SOURCE_MODEL` | `/mnt/paas/weights/Kimi-K3-w4a8` | 公共 ModelSlim W4A8 checkpoint | 是 |
 | `PRIVATE_MODEL` | `/home/l00889655/kimi_truncation` | 私有五层目录，缺失时自动创建 | 否 |
 | `SGLANG_ROOT` | 脚本所在仓库 | 容器里的 SGLang checkout | 是 |
@@ -86,6 +89,8 @@ sglang serve \
   --enable-hierarchical-cache --hicache-io-backend kernel_ascend \
   --hicache-mem-layout "$HICACHE_MEM_LAYOUT" \
   --hicache-write-policy write_through --hicache-ratio "$HICACHE_RATIO" \
+  --disable-cuda-graph --context-length "$CONTEXT_LENGTH" \
+  --max-total-tokens "$MAX_TOTAL_TOKENS" --max-running-requests "$MAX_RUNNING_REQUESTS" \
   "${EXTRA_SERVER_ARGS[@]}"
 ```
 

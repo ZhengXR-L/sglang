@@ -21,6 +21,8 @@ sglang serve \
   --enable-hierarchical-cache --hicache-io-backend kernel_ascend \
   --hicache-mem-layout "$HICACHE_MEM_LAYOUT" \
   --hicache-write-policy write_through --hicache-ratio "$HICACHE_RATIO" \
+  --disable-cuda-graph --context-length "$CONTEXT_LENGTH" \
+  --max-total-tokens "$MAX_TOTAL_TOKENS" --max-running-requests "$MAX_RUNNING_REQUESTS" \
   "${EXTRA_SERVER_ARGS[@]}" &
 SERVER_PID=$!
 trap 'kill -TERM "$SERVER_PID" 2>/dev/null || true' TERM INT
