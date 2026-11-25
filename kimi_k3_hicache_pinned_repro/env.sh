@@ -5,6 +5,7 @@ export PRIVATE_MODEL="${PRIVATE_MODEL:-/home/l00889655/kimi_truncation}" # 需�
 export SGLANG_ROOT="${SGLANG_ROOT:-$(cd -- "$HERE/.." && pwd)}" # 需修改
 export ASCEND_ENV="${ASCEND_ENV:-/usr/local/Ascend/ascend-toolkit/latest/set_env.sh}" # 需修改
 export NPU_DEVICES="${NPU_DEVICES:-0,1,2,3,4,5,6,7}" # 需修改
+export REPRO_BYPASS_MOE="${REPRO_BYPASS_MOE:-0}"
 export MODEL_PATH="${MODEL_PATH:-$PRIVATE_MODEL}"
 export CONTEXT_LENGTH="${CONTEXT_LENGTH:-4096}"
 export MAX_TOTAL_TOKENS="${MAX_TOTAL_TOKENS:-4096}"

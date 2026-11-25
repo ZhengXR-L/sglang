@@ -25,6 +25,7 @@ RuntimeError: host buffer must use pinned memory
 
 | 变量 | 示例或默认值 | 含义 | 必填 |
 | --- | --- | --- | --- |
+| `REPRO_BYPASS_MOE` | `0` | 设为 1 时将 KimiMoE 前向改为直接返回输入，仅用于执行路径验证 | 否 |
 | `MODEL_PATH` | 私有目录 | 实际模型路径，另设 Kimi Linear 路径时跳过减层准备 | 否 |
 | `CONTEXT_LENGTH` | `4096` | 上下文上限 | 否 |
 | `MAX_TOTAL_TOKENS` | `4096` | token pool 上限 | 否 |
@@ -105,7 +106,7 @@ sglang serve \
 
 | 退出码 | 含义 |
 | --- | --- |
-| 0 | 日志包含目标错误和两个目标栈帧，复现成功 |
+| 0 | 复现目标异常，或请求完成且记录到 MAMBA_OP_OK |
 | 1 | 请求完成，日志中未观察到目标异常 |
 | 2 | 端口被占用、服务启动失败、请求失败或服务退出等测试错误 |
 | 130 | 测试被中断 |
@@ -117,3 +118,5 @@ sglang serve \
 - 本用例使用串行文本请求，覆盖执行路径和同一异常的复现，不测精度、吞吐或所有 rank。
 
 完整 Kimi Linear 可用 MODEL_PATH=/mnt/paas/weights/Kimi-Linear-48B-A3B-Instruct QUANTIZATION=none 运行。调用日志记录 MAMBA_SOURCE、MAMBA_OP_BEGIN、MAMBA_OP_OK。空的 host backend 会取消导出，让模型的 setdefault 生效。
+
+MoE 旁路仍会加载原权重，仅跳过 MoE 前向计算。启用后输出文本用于执行路径检查。

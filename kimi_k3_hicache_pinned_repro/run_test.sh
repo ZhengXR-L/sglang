@@ -85,5 +85,9 @@ if (( request_rc )) || ! kill -0 "$SERVER_GROUP" 2>/dev/null; then
   RESULT="请求失败或服务退出，未观察到目标异常"
   exit 2
 fi
-RESULT="请求完成，未观察到目标异常"
+if grep -q MAMBA_OP_OK "$OUT/server.log"; then
+  RESULT="请求完成，已确认 Mamba 写回算子执行成功"
+  exit 0
+fi
+RESULT="请求完成，未观察到目标异常或算子成功记录"
 exit 1

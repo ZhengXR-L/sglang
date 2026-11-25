@@ -7,13 +7,25 @@ import traceback
 
 class TraceMamba(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
-        if fullname != "sglang.srt.mem_cache.pool_host.mamba":
+        if fullname not in ("sglang.srt.mem_cache.pool_host.mamba", "sglang.srt.models.kimi_linear"):
             return None
         spec = importlib.machinery.PathFinder.find_spec(fullname, path)
         original = spec.loader.exec_module
 
         def execute(module):
             original(module)
+            if fullname == "sglang.srt.models.kimi_linear":
+                if os.environ.get("REPRO_BYPASS_MOE") == "1":
+                    def bypass(self, hidden_states):
+                        if not getattr(self, "_repro_bypass_logged", False):
+                            print(
+                                f"MOE_BYPASS pid={os.getpid()} layer={self.layer_idx}",
+                                flush=True,
+                            )
+                            self._repro_bypass_logged = True
+                        return hidden_states
+                    module.KimiMoE.forward = bypass
+                return
             transfer = module.transfer_mamba_state
             print(f"MAMBA_SOURCE {module.__file__}", flush=True)
             if transfer is None:
