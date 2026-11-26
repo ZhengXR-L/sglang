@@ -25,6 +25,7 @@ RuntimeError: host buffer must use pinned memory
 
 | 变量 | 示例或默认值 | 含义 | 必填 |
 | --- | --- | --- | --- |
+| `REPRO_K3_MODEL_FILE` | 空 | 可选的独立 K3 模型适配文件，Mamba 仍从 SGLANG_ROOT 导入 | 否 |
 | `REPRO_BYPASS_MOE` | `0` | 设为 1 时将 KimiMoE 前向改为直接返回输入，仅用于执行路径验证 | 否 |
 | `MODEL_PATH` | 私有目录 | 实际模型路径，另设 Kimi Linear 路径时跳过减层准备 | 否 |
 | `CONTEXT_LENGTH` | `4096` | 上下文上限 | 否 |
@@ -169,3 +170,26 @@ sglang serve \
 完整 Kimi Linear 可用 MODEL_PATH=/mnt/paas/weights/Kimi-Linear-48B-A3B-Instruct QUANTIZATION=none 运行。调用日志记录 MAMBA_SOURCE、MAMBA_OP_BEGIN、MAMBA_OP_OK。空的 host backend 会取消导出，让模型的 setdefault 生效。
 
 MoE 旁路仍会加载原权重，仅跳过 MoE 前向计算。启用后输出文本用于执行路径检查。
+
+## B050 混合量化的投影适配
+
+若 B050 构建 K3 时提示 fused_qkvg_proj 的 Q/K/V 是 W8A8_DYNAMIC、G 是 FLOAT，可用 b050_split_qkvg.patch 生成独立模型文件。补丁复用 dts_kimi 已有的拆分逻辑，保持 QKV 融合、G 独立，以及对应的权重加载映射。应用前先核对源文件版本，patch 会在上下文不匹配时退出。
+
+```bash
+HERE=$(pwd)
+source ./env.sh
+mkdir -p ./b050_compat
+cp "$SGLANG_ROOT/python/sglang/srt/models/kimi_k3.py" ./b050_compat/kimi_k3.py
+patch --directory ./b050_compat -p1 < ./b050_split_qkvg.patch
+REPRO_K3_MODEL_FILE="$PWD/b050_compat/kimi_k3.py" python3 dts_test.py ./out/b050-five-layer
+```
+
+测试钩子只替换 K3 模型模块，Mamba host allocator 和 transfer_mamba_state 继续使用指定环境的原实现。此适配与 pinned memory 异常的根因修复分开记录。
+
+## 2026-11-26 B050 实测
+
+在 113.46.15.88 的 sglang-lzx-B050 中，使用物理卡 8、9、10、11，TP=4，真实的五层 Kimi K3 W4A8 checkpoint，MoE 旁路关闭，只有 L2。应用独立的 split QKV/G 模型适配后成功启动。Mamba host allocator 和 transfer_mamba_state 保持镜像原实现，kernel 从安装的 wheel 导入。
+
+基础四请求测试通过。随后以四组不同的 2048-token 前缀交替发送 36 个请求，每次生成 8 token，触发 L1 淘汰与 L2 回读。累计 host 命中 34816 token，记录到 432 次状态传输调用及 432 次成功，调用前 pinned=False 的记录为 0。此场景未复现 host buffer must use pinned memory。
+
+服务器记录位于 /home/l00889655/report/b050_kimi_k3_5layer_cards8_11 和 /home/l00889655/report/b050_kimi_k3_5layer_churn。运行脚本副本位于 /home/l00889655/sglang/kimi_k3_l2_run_20261126，独立适配模型文件为该目录的 patched_kimi_k3.py。

@@ -7,6 +7,11 @@ import traceback
 
 class TraceMamba(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
+        if fullname == "sglang.srt.models.kimi_k3":
+            patched = os.environ.get("REPRO_K3_MODEL_FILE")
+            if patched:
+                from importlib.util import spec_from_file_location
+                return spec_from_file_location(fullname, patched)
         if fullname not in ("sglang.srt.mem_cache.pool_host.mamba", "sglang.srt.models.kimi_linear"):
             return None
         spec = importlib.machinery.PathFinder.find_spec(fullname, path)
