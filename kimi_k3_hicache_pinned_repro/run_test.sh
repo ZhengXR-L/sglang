@@ -25,8 +25,8 @@ finish() {
     printf '# Kimi K3 HiCache L2 复现\n\n%s（退出码 %s）\n' "$RESULT" "$rc" > "$OUT/report.md"
     if (( rc == 0 )); then rc=2; fi
   fi
-  printf '%s\n输出目录 %s\n  %s\n' "$RESULT" "$OUT" \
-    "$OUT/server.log" "$OUT/eval.log" "$OUT/report.log" "$OUT/report.md"
+  printf '%s\n输出目录 %s\n' "$RESULT" "$OUT"
+  printf '  %s\n' "$OUT/server.log" "$OUT/eval.log" "$OUT/report.log" "$OUT/report.md"
   exit "$rc"
 }
 trap finish EXIT

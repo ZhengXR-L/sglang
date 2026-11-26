@@ -19,6 +19,8 @@ else:
 fields = (
     ("SGLang 路径", "SGLANG_ROOT"),
     ("公共模型", "SOURCE_MODEL"),
+    ("实际加载模型", "MODEL_PATH"),
+    ("MoE 旁路", "REPRO_BYPASS_MOE"),
     ("私有五层模型", "PRIVATE_MODEL"),
     ("NPU 卡号", "NPU_DEVICES"),
     ("端口", "PORT"),

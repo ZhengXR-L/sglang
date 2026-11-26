@@ -4,7 +4,7 @@ export SOURCE_MODEL="${SOURCE_MODEL:-/mnt/paas/weights/Kimi-K3-w4a8}" # 需修�
 export PRIVATE_MODEL="${PRIVATE_MODEL:-/home/l00889655/kimi_truncation}" # 需修改：私有目录
 export SGLANG_ROOT="${SGLANG_ROOT:-$(cd -- "$HERE/.." && pwd)}" # 需修改
 export ASCEND_ENV="${ASCEND_ENV:-/usr/local/Ascend/ascend-toolkit/latest/set_env.sh}" # 需修改
-export NPU_DEVICES="${NPU_DEVICES:-0,1,2,3,4,5,6,7}" # 需修改
+export NPU_DEVICES="${NPU_DEVICES:-0,1,2,3}" # 需修改
 export REPRO_BYPASS_MOE="${REPRO_BYPASS_MOE:-0}"
 export MODEL_PATH="${MODEL_PATH:-$PRIVATE_MODEL}"
 export CONTEXT_LENGTH="${CONTEXT_LENGTH:-4096}"
@@ -19,15 +19,26 @@ export REQUEST_COUNT="${REQUEST_COUNT:-4}"
 export QUANTIZATION="${QUANTIZATION:-modelslim}"
 export MEM_FRACTION_STATIC="${MEM_FRACTION_STATIC:-0.75}"
 export MAX_MAMBA_CACHE_SIZE="${MAX_MAMBA_CACHE_SIZE:-32}"
-export HICACHE_RATIO="${HICACHE_RATIO:-2.0}"
-export HICACHE_MEM_LAYOUT="${HICACHE_MEM_LAYOUT:-page_first_kv_split}"
+export HICACHE_RATIO="${HICACHE_RATIO:-1.2}"
+export HICACHE_MEM_LAYOUT="${HICACHE_MEM_LAYOUT:-page_first}"
 export SGLANG_HICACHE_HOST_MEM_BACKEND="${SGLANG_HICACHE_HOST_MEM_BACKEND:-}"
 if [[ -z "$SGLANG_HICACHE_HOST_MEM_BACKEND" ]]; then
   unset SGLANG_HICACHE_HOST_MEM_BACKEND
 fi
 export SGLANG_NPU_HICACHE_MAMBA_IO="${SGLANG_NPU_HICACHE_MAMBA_IO:-sync}"
 
-# 保留原故障配置需要的并行、MoE 等选项。每个参数独立引用。
+# 原用例中与本机 NPU 执行相关的环境变量。
+export SGLANG_SET_CPU_AFFINITY="${SGLANG_SET_CPU_AFFINITY:-1}"
+export SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS="${SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS:-1}"
+export SGLANG_NPU_USE_TRITON_PREFIX_KV_CACHE_STORE="${SGLANG_NPU_USE_TRITON_PREFIX_KV_CACHE_STORE:-1}"
+export SGLANG_ENABLE_OVERLAP_PLAN_STREAM="${SGLANG_ENABLE_OVERLAP_PLAN_STREAM:-1}"
+export SGLANG_RAGGED_VERIFY_MODE="${SGLANG_RAGGED_VERIFY_MODE:-static}"
+export PYTORCH_NPU_ALLOC_CONF="${PYTORCH_NPU_ALLOC_CONF:-expandable_segments:True}"
+export STREAMS_PER_DEVICE="${STREAMS_PER_DEVICE:-32}"
+export HCCL_BUFFSIZE="${HCCL_BUFFSIZE:-2000}"
+export HCCL_OP_EXPANSION_MODE="${HCCL_OP_EXPANSION_MODE:-AIV}"
+
+# 单机 TP 运行；按需保留原环境的额外选项，每个参数独立引用。
 EXTRA_SERVER_ARGS=(
   # --attn-dp-size 4 --enable-dp-lm-head
   # --moe-a2a-backend deepep --deepep-mode auto

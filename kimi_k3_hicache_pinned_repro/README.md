@@ -16,7 +16,7 @@ RuntimeError: host buffer must use pinned memory
 
 - 运行在 Linux Ascend 容器内，具备 Bash、`setsid`、curl、Python 3、Git、`sglang` CLI 和可用的 NPU。
 - 使用原故障的 Kimi K3 checkpoint、SGLang checkout、已安装的 `sgl_kernel_npu`、PyTorch / torch_npu 和 CANN 镜像。默认量化是 ModelSlim。
-- 空闲卡数由 checkpoint、减层配置和并行方式决定。默认 8 卡只是配置示例。多机、DP、EP 参数按原启动配置填入 `EXTRA_SERVER_ARGS`，此入口负责启动本机进程。
+- 空闲卡数由 checkpoint、减层配置和并行方式决定。默认 4 卡只是配置示例。多机、DP、EP 参数按原启动配置填入 `EXTRA_SERVER_ARGS`，此入口负责启动本机进程。
 - 请求直接构造 token ID，无需外部数据集。
 
 ## 环境变量
@@ -34,7 +34,7 @@ RuntimeError: host buffer must use pinned memory
 | `PRIVATE_MODEL` | `/home/l00889655/kimi_truncation` | 私有五层目录，缺失时自动创建 | 否 |
 | `SGLANG_ROOT` | 脚本所在仓库 | 容器里的 SGLang checkout | 是 |
 | `ASCEND_ENV` | `/usr/local/Ascend/ascend-toolkit/latest/set_env.sh` | CANN 环境脚本 | 是 |
-| `NPU_DEVICES` | `0,1,2,3,4,5,6,7` | 可见卡列表，列表长度作为本机 TP 默认值 | 是 |
+| `NPU_DEVICES` | `0,1,2,3` | 可见卡列表，列表长度作为本机 TP 默认值 | 是 |
 | `PORT` | `30000` | 本机服务端口 | 否 |
 | `STARTUP_TIMEOUT` | `1800` | 等待健康检查的秒数 | 否 |
 | `REQUEST_TIMEOUT` | `120` | 每次请求的 HTTP 超时秒数 | 否 |
@@ -44,13 +44,42 @@ RuntimeError: host buffer must use pinned memory
 | `QUANTIZATION` | `modelslim` | checkpoint 的量化方式 | 否 |
 | `MEM_FRACTION_STATIC` | `0.75` | 设备静态内存比例 | 否 |
 | `MAX_MAMBA_CACHE_SIZE` | `32` | 每个服务进程的 Mamba 状态池配置 | 否 |
-| `HICACHE_RATIO` | `2.0` | Host / device cache 容量比例 | 否 |
-| `HICACHE_MEM_LAYOUT` | `page_first_kv_split` | HiCache 内存布局，可按原容器的配置覆盖 | 否 |
+| `HICACHE_RATIO` | `1.2` | Host / device cache 容量比例 | 否 |
+| `HICACHE_MEM_LAYOUT` | `page_first` | HiCache 内存布局，可按原容器的配置覆盖 | 否 |
 | `SGLANG_HICACHE_HOST_MEM_BACKEND` | 空 | 保留原环境的 allocator 选择，支持时可设 `acl` 或 `memfabric` | 否 |
 | `SGLANG_NPU_HICACHE_MAMBA_IO` | `sync` | 选择包含目标 D2H 算子调用的同步分支 | 否 |
+| `SGLANG_SET_CPU_AFFINITY` | `1` | 保留原用例 CPU affinity 设置 | 否 |
+| `SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS` | `1` | 每个 worker 限制为一张可见卡 | 否 |
+| `SGLANG_NPU_USE_TRITON_PREFIX_KV_CACHE_STORE` | `1` | 原 NPU prefix cache 路径 | 否 |
+| `SGLANG_ENABLE_OVERLAP_PLAN_STREAM` | `1` | 原 overlap plan stream 配置 | 否 |
+| `SGLANG_RAGGED_VERIFY_MODE` | `static` | 保留原 ragged verify 配置 | 否 |
+| `PYTORCH_NPU_ALLOC_CONF` | `expandable_segments:True` | NPU allocator 配置 | 否 |
+| `STREAMS_PER_DEVICE` | `32` | 每卡 stream 数 | 否 |
+| `HCCL_BUFFSIZE` | `2000` | HCCL buffer 配置 | 否 |
+| `HCCL_OP_EXPANSION_MODE` | `AIV` | HCCL 通信模式 | 否 |
 | `EXTRA_SERVER_ARGS` | 空数组 | 在 env.sh 中设置原启动所需的额外并行、MoE 等参数 | 否 |
 
 `env.sh` 还会派生 `ASCEND_RT_VISIBLE_DEVICES`、`PYTHONPATH` 和 `TP_SIZE`。
+
+## 原始 dts_test.py 的单机改造
+
+在本目录编辑 env.sh 后执行以下入口，它调用同目录 run_test.sh 完成服务起停、请求和报告生成。
+
+```bash
+python3 dts_test.py ./out/kimi-k3-5layers-l2
+```
+
+默认使用四张卡和私有五层目录。SGLANG_ROOT 应指向要验证的代码，例如镜像自带 checkout。kernel 使用已安装的 wheel。执行时核对 server.log 的 MAMBA_SOURCE。原 checkpoint 在 text_config 中记录 93 层，prepare_model.py 会在私有目录生成五层配置，保留第 4 层 full attention 和第 1、2、3、5 层 KDA。若使用外部已裁剪目录，设置 MODEL_PATH。
+
+本地入口移除了多机 CI 基类及其集群节点、ConfigMap、Mooncake master 依赖。部署为单机 TP=4，attention DP 为默认 1。原脚本实际配置为 nnodes=4、tp-size=64、attn-dp-size=4。
+
+L2 保留 kernel_ascend、write_through 和 hicache_ratio=1.2。移除 Mooncake L3 的存储参数、TENT/MemFabric 环境变量与库路径注入、storage 命中率断言。请在干净的 shell 中运行，避免继承原测试的 MC_*、MF_* 等环境变量。
+
+减层后改为执行路径判定，移除了 GPQA/GSM8K 精度门槛。连续请求使用 2048 token 的共享前缀并各生成 8 token，替代原来的 64K 输入、1024 token 输出及 32 并发。默认上下文与 token pool 上限为 4096，运行请求上限为 2。
+
+DSPARK 需要独立 draft checkpoint 及其减层/缓存配置，这版移除了 speculative 参数。MoE 仍默认执行，REPRO_BYPASS_MOE=1 可用于绕过此前的 renorm 算子兼容错误。单机使用默认 TP MoE，移除了 DeepEP 专用启动参数及其环境变量。图模式暂时关闭，以便直接观察调用栈。
+
+分片只下载了前五层所需文件时，还需准备匹配的 checkpoint 索引及量化描述。prepare_model.py 当前只调整私有 config.json 并链接其他文件，不能替代离线 checkpoint 裁剪。
 
 ## 执行命令
 
@@ -75,19 +104,39 @@ if [[ "$MODEL_PATH" == "$PRIVATE_MODEL" ]]; then
   python3 -u "$HERE/prepare_model.py"
 fi
 
+# 使用已裁剪 checkpoint 时也检查层数和类型覆盖。
+python3 - "$MODEL_PATH" "$PREFIX_TOKENS" "$CONTEXT_LENGTH" <<'CHECK'
+import json
+import sys
+from pathlib import Path
+
+config = json.loads((Path(sys.argv[1]) / "config.json").read_text())
+text = config.get("text_config", config)
+if text["num_hidden_layers"] != 5:
+    raise SystemExit("本用例要求五层 checkpoint，请先准备私有减层目录")
+attention = text["linear_attn_config"]
+for name in ("kda_layers", "full_attn_layers"):
+    kept = [layer for layer in attention[name] if 1 <= layer <= 5]
+    if not kept:
+        raise SystemExit(f"前五层没有覆盖 {name}")
+    print(f"{name}={kept}", flush=True)
+if int(sys.argv[2]) + 1 + 8 > int(sys.argv[3]):
+    raise SystemExit("CONTEXT_LENGTH 至少需要覆盖 PREFIX_TOKENS + 1 + 8")
+CHECK
+
 QUANT_ARGS=()
 if [[ "$QUANTIZATION" != "none" ]]; then
   QUANT_ARGS=(--quantization "$QUANTIZATION")
 fi
 
 sglang serve \
-  --model-path "$MODEL_PATH" \
+  --model-path "$MODEL_PATH" --tokenizer-path "$MODEL_PATH" \
   --host 127.0.0.1 --port "$PORT" --trust-remote-code \
   --device npu --attention-backend ascend --dtype bfloat16 \
   "${QUANT_ARGS[@]}" --tp-size "$TP_SIZE" \
   --mem-fraction-static "$MEM_FRACTION_STATIC" \
   --max-mamba-cache-size "$MAX_MAMBA_CACHE_SIZE" \
-  --enable-hierarchical-cache --hicache-io-backend kernel_ascend \
+  --enable-hierarchical-cache --enable-cache-report --hicache-io-backend kernel_ascend \
   --hicache-mem-layout "$HICACHE_MEM_LAYOUT" \
   --hicache-write-policy write_through --hicache-ratio "$HICACHE_RATIO" \
   --disable-decode-cuda-graph --disable-prefill-cuda-graph --context-length "$CONTEXT_LENGTH" \
