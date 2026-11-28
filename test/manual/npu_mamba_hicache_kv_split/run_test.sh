@@ -16,11 +16,15 @@ echo "  报告日志: $OUT/report.log"' EXIT
 bash "$HERE/run_server.sh" > "$OUT/server.log" 2>&1 &
 SERVER_PID=$!
 
-for _ in $(seq 1 "$STARTUP_TIMEOUT"); do
+for ((i=0; i<STARTUP_TIMEOUT; i++)); do
+  if ! kill -0 "$SERVER_PID" 2>/dev/null; then break; fi
   if curl -sf "http://127.0.0.1:$PORT/health" > /dev/null; then break; fi
   sleep 1
 done
-curl -sf "http://127.0.0.1:$PORT/health" > /dev/null || { echo "server not ready"; exit 1; }
+if ! kill -0 "$SERVER_PID" 2>/dev/null || ! curl -sf "http://127.0.0.1:$PORT/health" > /dev/null; then
+  echo "服务未就绪，查看 $OUT/server.log" >&2
+  exit 1
+fi
 
 set +e
 python3 -u "$HERE/run_case.py" \

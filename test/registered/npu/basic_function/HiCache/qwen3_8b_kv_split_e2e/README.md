@@ -1,5 +1,17 @@
 # Qwen3-8B MHA HiCache KV split 端到端测试
 
+## B060 镜像运行方式
+
+在 B060 容器内运行原入口。脚本自行启动服务、等待就绪、发送请求并清理服务。
+
+```bash
+USE_IMAGE_CODE=1 bash test/registered/npu/basic_function/HiCache/qwen3_8b_kv_split_e2e/run_test.sh /tmp/b060-mha
+```
+
+命令从 `mha_op` 仓库根目录执行。`USE_IMAGE_CODE=1` 使用镜像的 SGLang 和
+sgl-kernel-npu，默认使用 12、13 卡及端口 47312，可用 `NPU_DEVICES` 和 `PORT` 覆盖。
+B060 通过 `--disable-decode-cuda-graph --disable-prefill-cuda-graph` 关闭两阶段的图执行。
+
 ## 测试目的
 
 在真实 Qwen3-8B 推理服务中，验证 NPU `kernel_ascend` 的 `page_first_direct` 布局能完成 KV 的 D2H 备份与 H2D 回载。重放请求须出现 Host 缓存命中，输出 token 与首次请求一致。

@@ -1,5 +1,18 @@
 # NPU Mamba HiCache state transfer 端到端测试
 
+## B060 镜像运行方式
+
+在 B060 容器内运行原入口。脚本自行启动服务、等待就绪、发送请求并清理服务。
+
+```bash
+USE_IMAGE_CODE=1 bash test/manual/npu_mamba_hicache_kv_split/run_test.sh /tmp/b060-mamba
+```
+
+命令从 `mha_op` 仓库根目录执行。`USE_IMAGE_CODE=1` 使用镜像的 SGLang 和
+sgl-kernel-npu，默认使用 12、13 卡及端口 47313，可用 `NPU_DEVICES` 和 `PORT` 覆盖。
+B060 通过 `--disable-decode-cuda-graph --disable-prefill-cuda-graph` 关闭两阶段的图执行。
+B060 还使用 `--page-size 128 --hicache-mem-layout page_first_direct --hicache-write-policy write_through`。
+
 ## 双用例结构
 
 `run_gsm8k.sh` 启动同一服务配置，`TEST_CASE` 选择客户端：

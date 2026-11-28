@@ -1,6 +1,18 @@
 #!/usr/bin/env bash
 # 唯一配置入口。按实际环境修改标记为「需修改」的默认值。
 
+# B060 mode uses the container's toolchain and installed kernel package.
+export USE_IMAGE_CODE="${USE_IMAGE_CODE:-0}"
+if [[ "$USE_IMAGE_CODE" == 1 ]]; then
+  export SGLANG_ROOT=/sgl-workspace/sglang
+  export MODEL_PATH="${MODEL_PATH:-/mnt/paas/weights/Qwen3.5-4B}"
+  export NPU_DEVICES="${NPU_DEVICES:-12,13}"
+  export PORT="${PORT:-47313}"
+  export PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1
+  export PYTORCH_NPU_ALLOC_CONF="${PYTORCH_NPU_ALLOC_CONF:-expandable_segments:True}"
+  export SGLANG_HICACHE_HOST_MEM_BACKEND="${SGLANG_HICACHE_HOST_MEM_BACKEND:-acl}"
+fi
+
 export SGLANG_ROOT="${SGLANG_ROOT:-/home/l00889655/sglang/sglang}" # 需修改
 # export KERNEL_ROOT="${KERNEL_ROOT:-/home/l00889655/sglang/sgl-kernel-npu}" # 需修改
 export MODEL_PATH="${MODEL_PATH:-/mnt/paas/weights/Qwen3.5-4B}" # 需修改
@@ -39,12 +51,16 @@ export MAX_FILLER_REQUESTS="${MAX_FILLER_REQUESTS:-12}"
 export GLOBAL_FILLER_CAP="${GLOBAL_FILLER_CAP:-0}"
 
 # Ascend 运行环境；set_env.sh 会引用未定义变量，source 期间临时关闭 -u。
-set +u
-source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh
-set -u
+if [[ "$USE_IMAGE_CODE" != 1 ]]; then
+  set +u
+  source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh
+  set -u
+fi
 export ASCEND_RT_VISIBLE_DEVICES="$NPU_DEVICES"
 
 export PYTORCH_NPU_ALLOC_CONF="${PYTORCH_NPU_ALLOC_CONF:-expandable_segments:True}"
 export HCCL_BUFFSIZE="${HCCL_BUFFSIZE:-2048}"
 # 使用包含 state direct 传输及模型算子的构建包；安装 wheel 时可覆盖。
-export PYTHONPATH="$SGLANG_ROOT/python${PYTHONPATH:+:$PYTHONPATH}"
+if [[ "$USE_IMAGE_CODE" != 1 ]]; then
+  export PYTHONPATH="$SGLANG_ROOT/python${PYTHONPATH:+:$PYTHONPATH}"
+fi
